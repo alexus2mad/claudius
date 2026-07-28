@@ -1,7 +1,8 @@
-# Klavdii I / Claude Code LCD Status — Technical Notes
+# Claudius I / Claude Code LCD Status — Technical Notes
 
-> The main document for installation and everyday use is the PDF in this
-> repo: **[«Клавдій I — Посібник користувача.pdf»](./Клавдій%20I%20—%20Посібник%20користувача.pdf)**.
+> The main documents for installation and everyday use are the PDF guides in
+> this repo: **[English](./Claudius_I_User_Guide_EN.pdf)** /
+> **[Ukrainian](./Клавдій%20I%20—%20Посібник%20користувача.pdf)**.
 > This file is for the technically curious: how the thing works, the wire
 > protocol, file locations, and manual procedures.
 
