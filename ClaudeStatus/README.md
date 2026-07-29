@@ -80,6 +80,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\setup.ps1
 ```
 
+The wizard opens with a "Connect your device" page and waits for it — the
+device doesn't need to be plugged in before you start the script, only by
+the time that first page finishes. It detects the board, fixes the CH340
+driver if needed, and flashes the firmware automatically once it appears.
+
 Options:
 
 - `-Port COM7` — override Arduino COM port (default: auto-detect)

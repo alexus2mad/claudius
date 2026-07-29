@@ -5,6 +5,10 @@
 
 .DESCRIPTION
     Walks through a browser-based setup wizard that lets the user:
+      - Connect the device: the wizard opens on a "Connect your device" page
+        and polls for it, so the installer can be run on a brand-new machine
+        before the device has ever been plugged in — it doesn't have to be
+        connected up front, only by the time this first page finishes
       - Pick their city on a live map (weather + air raid alerts for Ukraine)
       - Adjust the display brightness with live preview on the hardware
       - Toggle preferences (weather, alert sounds, all-clear chime)
@@ -14,7 +18,8 @@
       - Ensures the CH340 USB-serial driver is v3.4 (newer WCH drivers fail to
         open the port on many clone chips) — installs the bundled v3.4 if needed
       - Auto-detects the Arduino by USB VID:PID and flashes claude_status.hex
-        with bundled avrdude (tries both bootloader baud rates)
+        with bundled avrdude (tries both bootloader baud rates) — this and the
+        driver check happen once the wizard's Connect page detects the device
       - Copies daemon / hook scripts to %LOCALAPPDATA%\ClaudeStatus\app\
       - Patches ~/.claude/settings.json to register the five Claude Code hooks
       - Registers a Task Scheduler entry so the daemon starts at logon
@@ -154,18 +159,18 @@ function Ensure-CH340Driver {
     }
 }
 
-function Detect-Port {
-    Step "Detecting Arduino COM port"
-    if ($Port) { Done "Using override: $Port"; return $Port }
+function Try-DetectPort {
+    # Non-throwing scan, safe to call repeatedly from a polling loop --
+    # returns @{Port=...; IsCH340=...} or $null. See Detect-Port below for
+    # the throwing wrapper used by the non-interactive install path.
+    if ($Port) { return @{ Port = $Port; IsCH340 = $false } }
     $devs = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '\(COM\d+\)' }
     # Known USB IDs first — immune to localised/renamed friendly names.
     foreach ($id in @($USB_ID_UNO, $USB_ID_CH340)) {
         foreach ($d in $devs) {
             if ($d.DeviceID -match $id -and $d.Name -match '\((COM\d+)\)') {
-                $script:IsCH340 = ($id -eq $USB_ID_CH340)
-                Done "Found '$($d.Name)'"
-                return $matches[1]
+                return @{ Port = $matches[1]; IsCH340 = ($id -eq $USB_ID_CH340); Name = $d.Name }
             }
         }
     }
@@ -175,11 +180,21 @@ function Detect-Port {
     }
     foreach ($d in $hits) {
         if ($d.Name -match '\((COM\d+)\)') {
-            Done "Found '$($d.Name)'"
-            return $matches[1]
+            return @{ Port = $matches[1]; IsCH340 = $false; Name = $d.Name }
         }
     }
-    throw "Could not auto-detect an Arduino COM port. Plug it in and re-run, or pass -Port COMx."
+    return $null
+}
+
+function Detect-Port {
+    Step "Detecting Arduino COM port"
+    $found = Try-DetectPort
+    if (-not $found) {
+        throw "Could not auto-detect an Arduino COM port. Plug it in and re-run, or pass -Port COMx."
+    }
+    $script:IsCH340 = $found.IsCH340
+    if ($found.Name) { Done "Found '$($found.Name)'" } else { Done "Using override: $($found.Port)" }
+    return $found.Port
 }
 
 function Stop-Daemon {
@@ -244,117 +259,165 @@ $WIZARD_HTML = @'
 <title>ClaudeStatus — Setup</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
+/* Design tokens. Previously colors/spacing were hand-picked per rule (and a
+   contrast fix landed as one-off overrides) -- centralizing them here keeps
+   new rules consistent and makes future palette/contrast tweaks one-line
+   changes instead of a file-wide hunt. */
+:root{
+  --bg:#0d0d0d; --panel:#131315; --panel-2:#191a1c; --panel-3:#232326;
+  --border:#28282b; --border-soft:#1c1c1f;
+  --text:#f4f5f7; --text-dim:#c7cad0; --text-mute:#9aa0a8;
+  --accent:#2ecc71; --accent-hover:#3ee787; --accent-dim:#1a5c3a; --accent-ink:#06210f;
+  --accent-glow:rgba(46,204,113,.35); --accent-glow-soft:rgba(46,204,113,.14);
+  --danger:#ff8a80; --warn:#e8a33d;
+  --radius-sm:6px; --radius-md:10px; --radius-lg:14px;
+  --shadow-sm:0 2px 10px rgba(0,0,0,.3); --shadow-md:0 8px 24px rgba(0,0,0,.4);
+  --font:system-ui,-apple-system,'Segoe UI',sans-serif;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;overflow:hidden;background:#0d0d0d;color:#bbb;
-  font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px}
+html{height:100%}
+body{height:100%;overflow:hidden;display:flex;flex-direction:column;
+  background:var(--bg);color:var(--text-dim);font-family:var(--font);
+  font-size:16px;-webkit-font-smoothing:antialiased}
+::selection{background:var(--accent-glow-soft);color:var(--text)}
 
-/* Step dots */
-#stepdots{display:flex;align-items:center;gap:6px;padding:14px 20px;
-  background:#111;border-bottom:1px solid #1e1e1e}
-.dot{width:8px;height:8px;border-radius:50%;background:#2a2a2a;
-  transition:background .25s}
-.dot.done{background:#1a5c3a}
-.dot.active{background:#2ecc71;box-shadow:0 0 6px #2ecc7155}
-#step-label{margin-left:auto;font-size:11px;color:#444;letter-spacing:.5px}
+/* Step indicator -- connected dots with a filled track behind completed
+   steps, instead of isolated dots with no sense of overall progress. */
+#stepdots{flex:0 0 auto;display:flex;align-items:center;gap:0;padding:14px 22px;
+  background:var(--panel);border-bottom:1px solid var(--border-soft)}
+.dot{position:relative;width:9px;height:9px;border-radius:50%;background:var(--panel-3);
+  margin-right:15px;flex-shrink:0;transition:background .25s,box-shadow .25s}
+.dot:last-of-type{margin-right:0}
+.dot::after{content:'';position:absolute;top:50%;left:100%;width:15px;height:2px;
+  background:var(--panel-3);transform:translateY(-50%);transition:background .25s}
+.dot:last-of-type::after{display:none}
+.dot.done{background:var(--accent)}
+.dot.done::after{background:var(--accent)}
+.dot.active{background:var(--accent);box-shadow:0 0 0 4px var(--accent-glow-soft)}
+#step-label{margin-left:auto;font-size:11px;font-weight:700;color:var(--text-mute);
+  letter-spacing:1.4px;text-transform:uppercase}
 
-/* Page container */
-#pages{position:relative;height:calc(100vh - 49px - 56px);overflow:hidden}
+/* Page container -- flex:1 fills whatever space is left between the header
+   and nav bar, so their actual rendered height no longer has to match a
+   hardcoded calc() (a prior version guessed 49px/56px, which would clip
+   content the moment either bar's real height drifted). */
+#pages{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
 .page{position:absolute;inset:0;display:flex;flex-direction:column;
-  opacity:0;pointer-events:none;transition:opacity .25s}
-.page.active{opacity:1;pointer-events:all}
+  opacity:0;transform:translateY(6px);pointer-events:none;
+  transition:opacity .28s ease,transform .28s ease}
+.page.active{opacity:1;transform:translateY(0);pointer-events:all}
 
 /* Nav bar */
-#nav{height:56px;background:#111;border-top:1px solid #1e1e1e;
-  display:flex;align-items:center;justify-content:space-between;padding:0 20px;gap:12px}
-.btn{padding:9px 24px;border:none;border-radius:5px;font-size:13px;
-  font-weight:600;cursor:pointer;transition:background .15s,opacity .15s}
-#btn-back{background:#1a1a1a;color:#555}
-#btn-back:hover{background:#222;color:#888}
-#btn-skip{background:none;border:none;color:#444;font-size:12px;cursor:pointer;
-  padding:8px 12px}
-#btn-skip:hover{color:#888}
-#btn-next{background:#2ecc71;color:#fff;min-width:120px}
-#btn-next:hover:not(:disabled){background:#27ae60}
-#btn-next:disabled{background:#1a3a28;color:#2a6642;cursor:default}
+#nav{flex:0 0 auto;height:64px;background:var(--panel);border-top:1px solid var(--border-soft);
+  display:flex;align-items:center;justify-content:space-between;padding:0 22px;gap:12px}
+.btn{padding:11px 28px;border:none;border-radius:var(--radius-md);font-size:15px;
+  font-weight:600;cursor:pointer;font-family:inherit;
+  transition:background .15s,opacity .15s,transform .08s,box-shadow .15s}
+.btn:active{transform:scale(.97)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#btn-back{background:var(--panel-2);color:var(--text-mute)}
+#btn-back:hover{background:var(--panel-3);color:var(--text-dim)}
+#btn-skip{background:none;color:var(--text-mute);font-size:14px;padding:10px 14px;
+  border-radius:var(--radius-sm)}
+#btn-skip:hover{color:var(--text-dim);background:var(--panel-2)}
+#btn-next{background:var(--accent);color:var(--accent-ink);min-width:140px;
+  box-shadow:0 2px 12px var(--accent-glow-soft)}
+#btn-next:hover:not(:disabled){background:var(--accent-hover);
+  box-shadow:0 4px 16px rgba(46,204,113,.3)}
+#btn-next:disabled{background:var(--accent-dim);color:#3f7a56;cursor:default;box-shadow:none}
+
+/* ── Connect ── */
+#p-connect{justify-content:center;align-items:center;gap:24px;text-align:center;padding:40px}
+.connect-spinner{width:42px;height:42px;border:3px solid var(--panel-3);
+  border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}
+.connect-status{font-size:19px;color:var(--text);font-weight:600;max-width:440px;line-height:1.5}
+.connect-status.error{color:var(--danger)}
 
 /* ── Welcome ── */
 #p-welcome{justify-content:center;align-items:center;gap:28px;text-align:center;padding:40px}
-.logo{font-size:36px;font-weight:200;letter-spacing:6px;color:#fff}
-.logo b{color:#2ecc71;font-weight:700}
-.tagline{color:#555;font-size:14px;max-width:400px;line-height:1.7}
-.device-hint{display:inline-block;background:#141414;border:1px solid #1e1e1e;
-  border-radius:6px;padding:10px 18px;font-size:12px;color:#444;margin-top:4px}
-.device-hint code{color:#2ecc71}
+.logo{font-size:40px;font-weight:300;letter-spacing:5px;color:var(--text)}
+.logo b{color:var(--accent);font-weight:800}
+.tagline{color:var(--text-dim);font-size:16px;max-width:420px;line-height:1.7}
+.device-hint{display:inline-flex;align-items:center;gap:8px;background:var(--panel-2);
+  border:1px solid var(--border);border-radius:var(--radius-md);padding:11px 20px;
+  font-size:13px;color:var(--text-mute);margin-top:4px;box-shadow:var(--shadow-sm)}
+.device-hint code{color:var(--accent);font-family:Consolas,monospace}
 
 /* ── Location ── */
 #p-location{flex-direction:column}
 #map{flex:1}
-#loc-bar{padding:12px 20px;background:#111;border-top:1px solid #1e1e1e;
-  display:flex;align-items:center;gap:12px;min-height:56px}
-#loc-city{font-size:14px;color:#fff;font-weight:600;line-height:1.3}
-#loc-note{font-size:11px;margin-top:2px}
-.note-ua{color:#2ecc71}
-.note-other{color:#e67e22}
-.note-idle{color:#444}
-#loc-spinner{width:14px;height:14px;border:2px solid #2ecc71;border-top-color:transparent;
-  border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0;display:none}
+#loc-bar{padding:14px 22px;background:var(--panel);border-top:1px solid var(--border-soft);
+  display:flex;align-items:center;gap:14px;min-height:60px;box-shadow:0 -6px 20px rgba(0,0,0,.25)}
+#loc-city{font-size:16px;color:var(--text);font-weight:600;line-height:1.3}
+#loc-note{font-size:13px;margin-top:2px}
+.note-ua{color:var(--accent)}
+.note-other{color:var(--warn)}
+.note-idle{color:var(--text-mute)}
+#loc-spinner{width:15px;height:15px;border:2px solid var(--accent);
+  border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;
+  flex-shrink:0;display:none}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* ── Brightness ── */
 #p-brightness{justify-content:center;align-items:center;gap:28px;padding:32px 24px}
-.lcd{background:#001422;border:2px solid #002444;border-radius:4px;
-  padding:14px 18px;font-family:'Courier New',Courier,monospace;font-size:15px;
-  color:#7ab8e8;letter-spacing:1.5px;line-height:2.1;
-  width:100%;max-width:440px;
-  box-shadow:0 0 30px rgba(0,80,180,.25),inset 0 0 20px rgba(0,30,80,.5);
-  transition:filter .08s}
-.lcd-row{white-space:pre}
+.lcd{width:100%;max-width:440px;line-height:0;border-radius:var(--radius-md);
+  box-shadow:0 0 36px rgba(30,100,220,.22),var(--shadow-md);transition:filter .08s}
+.lcd svg{width:100%;height:auto;display:block}
 .bl-wrap{width:100%;max-width:440px}
-.bl-label{display:flex;justify-content:space-between;margin-bottom:10px;
-  font-size:12px;color:#555}
-.bl-label span{color:#fff;font-size:16px;font-weight:600}
-input[type=range]{width:100%;appearance:none;height:4px;background:#1e1e1e;
-  border-radius:2px;outline:none;cursor:pointer}
-input[type=range]::-webkit-slider-thumb{appearance:none;width:18px;height:18px;
-  background:#2ecc71;border-radius:50%;cursor:pointer;transition:transform .1s}
-input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
-.bl-note{font-size:11px;color:#444;text-align:center;max-width:400px;line-height:1.6}
+.bl-label{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px;
+  font-size:14px;color:var(--text-dim)}
+.bl-label span{color:var(--text);font-size:19px;font-weight:700}
+#bl-num{font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;appearance:none;height:5px;background:var(--panel-3);
+  border-radius:3px;outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{appearance:none;width:19px;height:19px;
+  background:var(--accent);border-radius:50%;cursor:pointer;
+  box-shadow:0 2px 8px rgba(46,204,113,.5);transition:transform .12s}
+input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15)}
+input[type=range]:focus-visible::-webkit-slider-thumb{outline:2px solid var(--accent);outline-offset:3px}
+input[type=range]::-moz-range-thumb{width:19px;height:19px;background:var(--accent);
+  border:none;border-radius:50%;cursor:pointer;box-shadow:0 2px 8px rgba(46,204,113,.5)}
+.bl-note{font-size:13px;color:var(--text-mute);text-align:center;max-width:400px;line-height:1.6}
 
 /* ── Preferences ── */
 #p-prefs{justify-content:center;align-items:center;padding:32px 24px;gap:8px}
-.pref-section{width:100%;max-width:440px}
-.pref-heading{font-size:10px;color:#444;text-transform:uppercase;
-  letter-spacing:1.2px;margin-bottom:12px;padding-left:2px}
+.pref-section{width:100%;max-width:440px;background:var(--panel);
+  border:1px solid var(--border-soft);border-radius:var(--radius-md);padding:4px 18px}
+.pref-heading{font-size:11px;color:var(--text-mute);text-transform:uppercase;
+  letter-spacing:1.4px;font-weight:700;margin:14px 0 4px;padding-left:2px}
 .pref-item{display:flex;justify-content:space-between;align-items:center;
-  padding:13px 0;border-bottom:1px solid #161616}
+  padding:14px 0;border-bottom:1px solid var(--border-soft)}
 .pref-item:last-child{border:none}
-.pref-text{}
-.pref-name{font-size:13px;color:#ccc}
-.pref-desc{font-size:11px;color:#444;margin-top:2px}
+.pref-name{font-size:15px;color:var(--text)}
+.pref-desc{font-size:13px;color:var(--text-mute);margin-top:2px}
 /* toggle */
-.toggle{position:relative;width:40px;height:22px;flex-shrink:0}
-.toggle input{opacity:0;width:0;height:0}
-.tslider{position:absolute;inset:0;background:#222;border-radius:11px;cursor:pointer;
-  transition:background .2s}
-.tslider::before{content:'';position:absolute;width:16px;height:16px;
-  left:3px;top:3px;background:#444;border-radius:50%;transition:.2s}
-.toggle input:checked+.tslider{background:#2ecc71}
+.toggle{position:relative;width:42px;height:24px;flex-shrink:0}
+.toggle input{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}
+.tslider{position:absolute;inset:0;background:var(--panel-3);border-radius:12px;
+  transition:background .2s;pointer-events:none}
+.tslider::before{content:'';position:absolute;width:18px;height:18px;
+  left:3px;top:3px;background:#8a8d94;border-radius:50%;transition:.2s;box-shadow:var(--shadow-sm)}
+.toggle input:checked+.tslider{background:var(--accent)}
 .toggle input:checked+.tslider::before{transform:translateX(18px);background:#fff}
+.toggle input:focus-visible+.tslider{outline:2px solid var(--accent);outline-offset:2px}
 
 /* ── Done ── */
-#p-done{justify-content:center;align-items:center;gap:20px;padding:40px;text-align:center}
-.done-check{font-size:56px;line-height:1}
-.done-title{font-size:22px;color:#fff;font-weight:300}
-.done-card{background:#111;border:1px solid #1e1e1e;border-radius:8px;
-  padding:18px 24px;width:100%;max-width:420px;text-align:left}
-.done-row{display:flex;justify-content:space-between;padding:6px 0;
-  border-bottom:1px solid #181818;font-size:12px}
+#p-done{justify-content:center;align-items:center;gap:22px;padding:40px;text-align:center}
+.done-check{width:76px;height:76px;border-radius:50%;background:var(--accent-glow-soft);
+  color:var(--accent);display:flex;align-items:center;justify-content:center;
+  font-size:36px;font-weight:700;box-shadow:0 0 0 1px var(--accent-dim)}
+.done-title{font-size:28px;color:var(--text);font-weight:600}
+.done-card{background:var(--panel);border:1px solid var(--border-soft);border-radius:var(--radius-md);
+  padding:20px 26px;width:100%;max-width:440px;text-align:left;box-shadow:var(--shadow-sm)}
+.done-row{display:flex;justify-content:space-between;padding:9px 0;
+  border-bottom:1px solid var(--border-soft);font-size:14px}
 .done-row:last-child{border:none}
-.done-key{color:#444}
-.done-val{color:#ccc}
-.done-val.green{color:#2ecc71}
-.done-hint{font-size:12px;color:#444;max-width:380px;line-height:1.6}
-.done-hint code{color:#2ecc71;background:#0d1f0d;padding:1px 5px;border-radius:3px}
+.done-key{color:var(--text-mute)}
+.done-val{color:var(--text)}
+.done-val.green{color:var(--accent-hover)}
+.done-hint{font-size:14px;color:var(--text-mute);max-width:400px;line-height:1.6}
+.done-hint code{color:var(--accent-hover);background:rgba(46,204,113,.1);
+  padding:2px 6px;border-radius:4px;font-family:Consolas,monospace}
 </style>
 </head>
 <body>
@@ -365,19 +428,28 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
   <div class="dot" data-i="2"></div>
   <div class="dot" data-i="3"></div>
   <div class="dot" data-i="4"></div>
-  <span id="step-label">WELCOME</span>
+  <div class="dot" data-i="5"></div>
+  <span id="step-label">CONNECT</span>
 </div>
 
 <div id="pages">
 
-  <!-- 0: Welcome -->
-  <div class="page active" id="p-welcome">
+  <!-- 0: Connect -->
+  <div class="page active" id="p-connect">
+    <div class="logo">Claude<b>Status</b></div>
+    <div class="connect-spinner" id="connect-spinner"></div>
+    <p class="connect-status" id="connect-status">Looking for your device…</p>
+    <p class="tagline">Plug the display into a USB-C port. This page updates on its own once it's found — no need to click anything.</p>
+  </div>
+
+  <!-- 1: Welcome -->
+  <div class="page" id="p-welcome">
     <div class="logo">Claude<b>Status</b></div>
     <p class="tagline">Your Arduino LCD display is connected and ready. This wizard configures location, display brightness, and alert preferences — takes about 2 minutes.</p>
     <div class="device-hint">Device detected &amp; flashed &nbsp;·&nbsp; <code>claude_status.hex</code></div>
   </div>
 
-  <!-- 1: Location -->
+  <!-- 2: Location -->
   <div class="page" id="p-location">
     <div id="map"></div>
     <div id="loc-bar">
@@ -389,25 +461,20 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
     </div>
   </div>
 
-  <!-- 2: Brightness -->
+  <!-- 3: Brightness -->
   <div class="page" id="p-brightness">
-    <div class="lcd" id="lcd-sim">
-      <div class="lcd-row">== Claude Code ==   </div>
-      <div class="lcd-row" id="lcd-row1">        IDLE        </div>
-      <div class="lcd-row" id="lcd-row2">                    </div>
-      <div class="lcd-row" id="lcd-row3">                    </div>
-    </div>
+    <div class="lcd" id="lcd-sim"></div>
     <div class="bl-wrap">
       <div class="bl-label">
         <span>Display brightness</span>
-        <span id="bl-num">20</span><span style="color:#555">%</span>
+        <span id="bl-num">20</span><span style="color:var(--text-mute)">%</span>
       </div>
       <input type="range" id="bl-slider" min="0" max="100" value="20">
     </div>
     <p class="bl-note">Adjust until the display is comfortable. The value is saved to the device and restored on every power-up.</p>
   </div>
 
-  <!-- 3: Preferences -->
+  <!-- 4: Preferences -->
   <div class="page" id="p-prefs">
     <div class="pref-section">
       <div class="pref-heading">Display</div>
@@ -438,7 +505,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
     </div>
   </div>
 
-  <!-- 4: Done -->
+  <!-- 5: Done -->
   <div class="page" id="p-done">
     <div class="done-check">✓</div>
     <div class="done-title">All set!</div>
@@ -452,14 +519,35 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.2)}
 <div id="nav">
   <button class="btn" id="btn-back" style="visibility:hidden">← Back</button>
   <button class="btn" id="btn-skip" style="display:none">Skip for now</button>
-  <button class="btn" id="btn-next">Get started →</button>
+  <button class="btn" id="btn-next" style="display:none">Get started →</button>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 'use strict';
 const PORT = %%PORT%%;
-const STEP_LABELS = ['WELCOME','LOCATION','BRIGHTNESS','PREFERENCES','DONE'];
+const STEP_LABELS = ['CONNECT','WELCOME','LOCATION','BRIGHTNESS','PREFERENCES','DONE'];
+
+// Surface any uncaught error on-screen instead of leaving a button that
+// silently "does nothing" -- this wizard has no dev console open in the
+// normal case, so a swallowed exception is otherwise invisible.
+window.addEventListener('error', e => showFatalError(e.message));
+window.addEventListener('unhandledrejection', e => showFatalError(String(e.reason)));
+function showFatalError(msg) {
+  let box = document.getElementById('fatal-error');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'fatal-error';
+    box.style.cssText = 'position:fixed;left:12px;right:12px;bottom:64px;'
+      + 'background:#3a1414;border:1px solid #6b1f1f;color:#ffb3b3;'
+      + 'padding:10px 14px;border-radius:6px;font-size:12px;z-index:9999;'
+      + 'white-space:pre-wrap';
+    document.body.appendChild(box);
+  }
+  box.textContent = 'Setup wizard hit an error: ' + msg
+    + '\nYou can close this window -- the device already has the latest firmware. '
+    + 'Re-run setup.ps1 to try the wizard again.';
+}
 
 let step = 0;
 let locPayload = null;
@@ -470,17 +558,32 @@ let blDebounce;
 
 // ── Routing ──────────────────────────────────────────────────────────────────
 async function api(path, body) {
+  // A hard timeout so a slow/stuck local listener can never leave the UI
+  // waiting forever (observed: closing the setup.ps1 terminal -- which
+  // tears down the listener's socket -- was what finally unstuck the
+  // "Finish setup" button, meaning the fetch below was hanging rather
+  // than erroring). 5 s is generous for a same-machine loopback call.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
     await fetch('http://localhost:' + PORT + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: ctrl.signal
     });
-  } catch (_) {}
+  } catch (_) {
+    // Swallowed deliberately: the wizard's own local install continues
+    // regardless of whether this round-trip completes, and the /config
+    // POST is a one-shot best-effort call, not something worth blocking
+    // setup completion over.
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
-const PAGES = ['p-welcome','p-location','p-brightness','p-prefs','p-done'];
+const PAGES = ['p-connect','p-welcome','p-location','p-brightness','p-prefs','p-done'];
 function goTo(n) {
   document.querySelectorAll('.page').forEach((p,i) => p.classList.toggle('active', i===n));
   document.querySelectorAll('.dot').forEach((d,i) => {
@@ -488,27 +591,70 @@ function goTo(n) {
     d.classList.toggle('done', i<n);
   });
   document.getElementById('step-label').textContent = STEP_LABELS[n];
-  document.getElementById('btn-back').style.visibility = (n>0 && n<4) ? 'visible' : 'hidden';
-  document.getElementById('btn-skip').style.display = (n===1) ? 'inline-block' : 'none';
+  document.getElementById('btn-back').style.visibility = (n>1 && n<5) ? 'visible' : 'hidden';
+  document.getElementById('btn-skip').style.display = (n===2) ? 'inline-block' : 'none';
 
   const nxt = document.getElementById('btn-next');
-  if      (n===0) { nxt.textContent='Get started →'; nxt.disabled=false; }
-  else if (n===1) { nxt.textContent='Next →';        nxt.disabled=!locPayload; }
-  else if (n===2) { nxt.textContent='Next →';        nxt.disabled=false; }
-  else if (n===3) { nxt.textContent='Finish setup';  nxt.disabled=false; }
+  nxt.style.display = 'inline-block';
+  if      (n===0) { nxt.style.display='none'; }  // fully automatic -- no button at all
+  else if (n===1) { nxt.textContent='Get started →'; nxt.disabled=false; }
+  else if (n===2) { nxt.textContent='Next →';        nxt.disabled=!locPayload; }
+  else if (n===3) { nxt.textContent='Next →';        nxt.disabled=false; }
+  else if (n===4) { nxt.textContent='Finish setup';  nxt.disabled=false; }
   else            { nxt.style.display='none'; document.getElementById('btn-back').style.visibility='hidden'; }
 
-  if (n===1 && !map) initMap();
-  if (n===1 && map) setTimeout(()=>map.invalidateSize(),50);
+  if (n===2 && !map) initMap();
+  if (n===2 && map) setTimeout(()=>map.invalidateSize(),50);
+  if (n===0) startConnectPoll();
   step = n;
 }
 
 document.getElementById('btn-back').addEventListener('click', ()=>goTo(step-1));
-document.getElementById('btn-skip').addEventListener('click', ()=>{ locPayload=null; goTo(2); });
+document.getElementById('btn-skip').addEventListener('click', ()=>{ locPayload=null; goTo(3); });
 document.getElementById('btn-next').addEventListener('click', async ()=>{
-  if (step===3) { await finish(); return; }
+  if (step===4) { await finish(); return; }
   goTo(step+1);
 });
+
+// ── Connect (step 0) ─────────────────────────────────────────────────────────
+let connectPollTimer = null;
+let connectPolling = false;
+function startConnectPoll() {
+  if (connectPolling) return;
+  connectPolling = true;
+  pollConnect();
+}
+async function pollConnect() {
+  const statusEl = document.getElementById('connect-status');
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    const r = await fetch('http://localhost:' + PORT + '/portcheck', { signal: ctrl.signal });
+    clearTimeout(timer);
+    const data = await r.json();
+    if (data.status === 'ready') {
+      statusEl.classList.remove('error');
+      statusEl.textContent = 'Device found — starting setup…';
+      document.getElementById('connect-spinner').style.display = 'none';
+      connectPolling = false;
+      setTimeout(() => goTo(1), 500);
+      return;
+    } else if (data.status === 'error') {
+      statusEl.classList.add('error');
+      statusEl.textContent = "Couldn't finish setting up the device: " + data.message
+        + ' — unplug and replug it to try again.';
+    } else {
+      statusEl.classList.remove('error');
+      statusEl.textContent = 'Waiting for your device — plug it in via USB-C…';
+    }
+  } catch (_) {
+    // Local server not answering yet/right now -- keep it low-key and
+    // just keep polling rather than treating this as a fatal error.
+    statusEl.classList.remove('error');
+    statusEl.textContent = 'Waiting for your device — plug it in via USB-C…';
+  }
+  connectPollTimer = setTimeout(pollConnect, 1500);
+}
 
 // ── Location ─────────────────────────────────────────────────────────────────
 function initMap() {
@@ -575,6 +721,88 @@ async function onMapClick(e) {
 }
 
 // ── Brightness ────────────────────────────────────────────────────────────────
+// HD44780 5x8 dot-matrix font + SVG renderer, mirrored from docs/guide_common.py
+// so the preview here matches the user guide's screen figures exactly -- keep
+// both in sync if the firmware ever prints a glyph not yet in this table.
+const LCD_FONT = {
+  ' ': [0x00,0x00,0x00,0x00,0x00], '!': [0x00,0x00,0x5F,0x00,0x00],
+  '%': [0x23,0x13,0x08,0x64,0x62], ',': [0x00,0x50,0x30,0x00,0x00],
+  '-': [0x08,0x08,0x08,0x08,0x08], '.': [0x00,0x60,0x60,0x00,0x00],
+  ':': [0x00,0x36,0x36,0x00,0x00], '=': [0x14,0x14,0x14,0x14,0x14],
+  '?': [0x02,0x01,0x51,0x09,0x06],
+  '0': [0x3E,0x51,0x49,0x45,0x3E], '1': [0x00,0x42,0x7F,0x40,0x00],
+  '2': [0x42,0x61,0x51,0x49,0x46], '3': [0x21,0x41,0x45,0x4B,0x31],
+  '4': [0x18,0x14,0x12,0x7F,0x10], '5': [0x27,0x45,0x45,0x45,0x39],
+  '6': [0x3C,0x4A,0x49,0x49,0x30], '7': [0x01,0x71,0x09,0x05,0x03],
+  '8': [0x36,0x49,0x49,0x49,0x36], '9': [0x06,0x49,0x49,0x29,0x1E],
+  'A': [0x7E,0x11,0x11,0x11,0x7E], 'B': [0x7F,0x49,0x49,0x49,0x36],
+  'C': [0x3E,0x41,0x41,0x41,0x22], 'D': [0x7F,0x41,0x41,0x22,0x1C],
+  'E': [0x7F,0x49,0x49,0x49,0x41], 'F': [0x7F,0x09,0x09,0x09,0x01],
+  'G': [0x3E,0x41,0x49,0x49,0x7A], 'H': [0x7F,0x08,0x08,0x08,0x7F],
+  'I': [0x00,0x41,0x7F,0x41,0x00], 'J': [0x20,0x40,0x41,0x3F,0x01],
+  'K': [0x7F,0x08,0x14,0x22,0x41], 'L': [0x7F,0x40,0x40,0x40,0x40],
+  'M': [0x7F,0x02,0x0C,0x02,0x7F], 'N': [0x7F,0x04,0x08,0x10,0x7F],
+  'O': [0x3E,0x41,0x41,0x41,0x3E], 'P': [0x7F,0x09,0x09,0x09,0x06],
+  'Q': [0x3E,0x41,0x51,0x21,0x5E], 'R': [0x7F,0x09,0x19,0x29,0x46],
+  'S': [0x46,0x49,0x49,0x49,0x31], 'T': [0x01,0x01,0x7F,0x01,0x01],
+  'U': [0x3F,0x40,0x40,0x40,0x3F], 'V': [0x1F,0x20,0x40,0x20,0x1F],
+  'W': [0x3F,0x40,0x38,0x40,0x3F], 'X': [0x63,0x14,0x08,0x14,0x63],
+  'Y': [0x07,0x08,0x70,0x08,0x07], 'Z': [0x61,0x51,0x49,0x45,0x43],
+  'a': [0x20,0x54,0x54,0x54,0x78], 'b': [0x7F,0x48,0x44,0x44,0x38],
+  'c': [0x38,0x44,0x44,0x44,0x20], 'd': [0x38,0x44,0x44,0x48,0x7F],
+  'e': [0x38,0x54,0x54,0x54,0x18], 'f': [0x08,0x7E,0x09,0x01,0x02],
+  'g': [0x0C,0x52,0x52,0x52,0x3E], 'h': [0x7F,0x08,0x04,0x04,0x78],
+  'i': [0x00,0x44,0x7D,0x40,0x00], 'j': [0x20,0x40,0x44,0x3D,0x00],
+  'k': [0x7F,0x10,0x28,0x44,0x00], 'l': [0x00,0x41,0x7F,0x40,0x00],
+  'm': [0x7C,0x04,0x18,0x04,0x78], 'n': [0x7C,0x08,0x04,0x04,0x78],
+  'o': [0x38,0x44,0x44,0x44,0x38], 'p': [0x7C,0x14,0x14,0x14,0x08],
+  'q': [0x08,0x14,0x14,0x18,0x7C], 'r': [0x7C,0x08,0x04,0x04,0x08],
+  's': [0x48,0x54,0x54,0x54,0x20], 't': [0x04,0x3F,0x44,0x40,0x20],
+  'u': [0x3C,0x40,0x40,0x20,0x7C], 'v': [0x1C,0x20,0x40,0x20,0x1C],
+  'w': [0x3C,0x40,0x30,0x40,0x3C], 'x': [0x44,0x28,0x10,0x28,0x44],
+  'y': [0x0C,0x50,0x50,0x50,0x3C], 'z': [0x44,0x64,0x54,0x4C,0x44],
+  '°': [0x06,0x09,0x09,0x06,0x00],
+};
+const LCD_PX = 3.2, LCD_GAP = 0.8, LCD_CHG = 2.4, LCD_ROWG = 3.4, LCD_PAD = 13, LCD_BEZEL = 9;
+const LCD_CW = 5 * (LCD_PX + LCD_GAP) - LCD_GAP;
+const LCD_CH = 8 * (LCD_PX + LCD_GAP) - LCD_GAP;
+const LCD_W  = 20 * (LCD_CW + LCD_CHG) - LCD_CHG + 2 * LCD_PAD;
+const LCD_H  = 4 * (LCD_CH + LCD_ROWG) - LCD_ROWG + 2 * LCD_PAD;
+const LCD_BG = '#1a2fbe', LCD_UNLIT = '#2742cf', LCD_LIT = '#eaf3ff';
+
+function lcdCentered(s) {
+  s = s.slice(0, 20);
+  return ' '.repeat(Math.floor((20 - s.length) / 2)) + s;
+}
+
+function lcdSvg(rows) {
+  const w = LCD_W + 2 * LCD_BEZEL, h = LCD_H + 2 * LCD_BEZEL;
+  let out = '<svg viewBox="0 0 ' + w.toFixed(1) + ' ' + h.toFixed(1) + '" width="100%" xmlns="http://www.w3.org/2000/svg" role="img">';
+  out += '<rect x="0" y="0" width="' + w.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="5" fill="#181a1f"/>';
+  out += '<rect x="' + LCD_BEZEL + '" y="' + LCD_BEZEL + '" width="' + LCD_W.toFixed(1) + '" height="' + LCD_H.toFixed(1) + '" rx="2.5" fill="' + LCD_BG + '"/>';
+  for (let r = 0; r < 4; r++) {
+    const text = (rows[r] || '').padEnd(20).slice(0, 20);
+    const y0 = LCD_BEZEL + LCD_PAD + r * (LCD_CH + LCD_ROWG);
+    for (let c = 0; c < 20; c++) {
+      const glyph = LCD_FONT[text[c]] || LCD_FONT[' '];
+      const x0 = LCD_BEZEL + LCD_PAD + c * (LCD_CW + LCD_CHG);
+      for (let col = 0; col < 5; col++) {
+        const bits = glyph[col];
+        for (let row = 0; row < 8; row++) {
+          const fill = (bits >> row) & 1 ? LCD_LIT : LCD_UNLIT;
+          out += '<rect x="' + (x0 + col * (LCD_PX + LCD_GAP)).toFixed(2) + '" y="' + (y0 + row * (LCD_PX + LCD_GAP)).toFixed(2) + '" width="' + LCD_PX + '" height="' + LCD_PX + '" fill="' + fill + '"/>';
+        }
+      }
+    }
+  }
+  out += '</svg>';
+  return out;
+}
+
+document.getElementById('lcd-sim').innerHTML = lcdSvg([
+  lcdCentered('== Claude Code =='), '', lcdCentered('IDLE'), lcdCentered('5h:42% in 2h13m')
+]);
+
 document.getElementById('bl-slider').addEventListener('input', e => {
   brightness = parseInt(e.target.value);
   document.getElementById('bl-num').textContent = brightness;
@@ -585,21 +813,6 @@ document.getElementById('bl-slider').addEventListener('input', e => {
 // Apply initial filter
 document.getElementById('lcd-sim').style.filter = 'brightness(20%)';
 
-// Live clock in LCD sim (mimics the idle screensaver the device shows)
-(function tickClock() {
-  const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  function pad2(n) { return String(n).padStart(2,'0'); }
-  function pad(s, n) { return s.length >= n ? s.substring(0,n) : s + ' '.repeat(n - s.length); }
-  const now = new Date();
-  const hhmm = pad2(now.getHours()) + ':' + pad2(now.getMinutes());
-  const date = DAYS[now.getDay()] + ', ' + MONTHS[now.getMonth()] + ' ' + pad2(now.getDate());
-  document.getElementById('lcd-row2').textContent = pad(hhmm, 20);
-  document.getElementById('lcd-row3').textContent = pad(date, 20);
-  const msToNextMin = (60 - now.getSeconds()) * 1000 - now.getMilliseconds();
-  setTimeout(tickClock, msToNextMin);
-})();
-
 // ── Preferences ───────────────────────────────────────────────────────────────
 document.getElementById('pf-weather').addEventListener('change',  e=>prefs.weather  = e.target.checked);
 document.getElementById('pf-sound').addEventListener('change',    e=>prefs.sound    = e.target.checked);
@@ -607,47 +820,125 @@ document.getElementById('pf-allclear').addEventListener('change', e=>prefs.allcl
 
 // ── Finish ────────────────────────────────────────────────────────────────────
 async function finish() {
-  const payload = { brightness, location: locPayload, prefs };
-  await api('/config', payload);
+  const nxt = document.getElementById('btn-next');
+  nxt.disabled = true;
+  nxt.textContent = 'Finishing…';
+  try {
+    const payload = { brightness, location: locPayload, prefs };
+    await api('/config', payload);
 
-  // Build done card
-  const loc = locPayload;
-  const rows = [
-    ['Location',      loc ? loc.city+', '+loc.country : 'Not configured'],
-    ['Air raid alerts', loc && loc.country_code==='ua' ? 'Enabled' : 'Disabled'],
-    ['Brightness',    brightness+'%'],
-    ['Weather',       prefs.weather ? 'Enabled' : 'Disabled'],
-    ['Alert siren',   prefs.sound   ? 'Enabled' : 'Disabled'],
-    ['All-clear chime', prefs.allclear ? 'Enabled' : 'Disabled'],
-  ];
-  const card = document.getElementById('done-card');
-  card.innerHTML = rows.map(([k,v]) =>
-    `<div class="done-row"><span class="done-key">${k}</span><span class="done-val ${v.startsWith('En')?'green':''}">${v}</span></div>`
-  ).join('');
+    // Build done card
+    const loc = locPayload;
+    const rows = [
+      ['Location',      loc ? loc.city+', '+loc.country : 'Not configured'],
+      ['Air raid alerts', loc && loc.country_code==='ua' ? 'Enabled' : 'Disabled'],
+      ['Brightness',    brightness+'%'],
+      ['Weather',       prefs.weather ? 'Enabled' : 'Disabled'],
+      ['Alert siren',   prefs.sound   ? 'Enabled' : 'Disabled'],
+      ['All-clear chime', prefs.allclear ? 'Enabled' : 'Disabled'],
+    ];
+    const card = document.getElementById('done-card');
+    card.innerHTML = rows.map(([k,v]) =>
+      `<div class="done-row"><span class="done-key">${k}</span><span class="done-val ${v.startsWith('En')?'green':''}">${v}</span></div>`
+    ).join('');
 
-  goTo(4);
+    goTo(5);
+  } catch (err) {
+    nxt.disabled = false;
+    nxt.textContent = 'Finish setup';
+    showFatalError(err && err.message ? err.message : String(err));
+  }
 }
+
+goTo(0);  // start on the Connect page and kick off its poll
 </script>
 </body>
 </html>
 '@
 
-function Show-SetupWizard([string]$comPort) {
+function Show-SetupWizard {
     Step "Launching setup wizard"
 
-    # Try to open serial for live brightness preview.
-    $serial = $null
-    try {
-        $serial = New-Object System.IO.Ports.SerialPort($comPort, 9600)
-        $serial.DtrEnable = $false
-        $serial.RtsEnable = $false
-        $serial.WriteTimeout = 500
-        $serial.Open()
-        Start-Sleep -Seconds 3  # wait for Arduino post-flash boot
+    # The device may not be plugged in yet -- a brand-new machine that has
+    # never seen this device before shouldn't require the user to have
+    # already connected it before running the installer. Everything
+    # hardware-related (driver fix, flashing, opening serial for the
+    # brightness preview) is deferred to the wizard's own "Connect your
+    # device" page and its /portcheck poll, below, rather than done
+    # up-front -- so this starts with nothing plugged in assumed.
+    $deviceReady = $false
+
+    # Serial writes happen on a background runspace, never on the HTTP
+    # loop's own thread. .NET's SerialPort is notorious for not reliably
+    # honouring WriteTimeout on flaky USB-serial hardware (this project has
+    # already hit real CH340 driver quirks) -- if a single WriteLine call
+    # from a brightness-slider drag ever truly hangs, it must not be able
+    # to freeze the single-threaded loop that also has to service the
+    # later "Finish setup" POST /config request on that same thread.
+    $serial       = $null
+    $serialState  = [hashtable]::Synchronized(@{ Pending = $null; Cmd = $null; Stop = $false })
+    $serialRunner = $null
+    $serialPs     = $null
+    $serialHandle = $null
+
+    # Returns @{ Serial=...; Ps=...; Runner=...; Handle=... } on success, or
+    # $null if the port couldn't be opened. Takes $state explicitly (rather
+    # than closing over the caller's $serialState) so this stays a plain,
+    # side-effect-free helper -- the caller assigns the pieces it gets back
+    # onto its OWN local variables, which keeps all the serial-preview
+    # state scoped to this one Show-SetupWizard invocation instead of
+    # leaking onto $script:.
+    function Start-BrightnessPreview([string]$port, $state) {
+        $s = New-Object System.IO.Ports.SerialPort($port, 9600)
+        $s.DtrEnable = $false
+        $s.RtsEnable = $false
+        $s.WriteTimeout = 300
+
+        # Called right after Flash-Arduino/avrdude just used this same
+        # port. avrdude's own post-write verify step already proves the
+        # board is alive and responding here, so a failed open isn't the
+        # board still resetting -- more likely Windows hasn't fully
+        # released avrdude's handle yet. Retry a few times with short
+        # delays rather than giving up on the very first attempt (observed
+        # in practice: an immediate, un-retried open right after flashing
+        # hit "a device attached to the system is not functioning" and
+        # never recovered without a physical replug -- the same class of
+        # CH340 wedge this project has hit before). This can't fix a
+        # genuine hardware wedge, only a brief handle-release race.
+        $opened   = $false
+        $lastErr  = $null
+        for ($i = 1; $i -le 4; $i++) {
+            Start-Sleep -Milliseconds 700
+            try { $s.Open(); $opened = $true; break } catch { $lastErr = $_ }
+        }
+        if (-not $opened) {
+            Warn2 "Could not open $port for brightness preview: $lastErr"
+            return $null
+        }
+        Start-Sleep -Seconds 2  # wait for Arduino post-flash boot
         Info "Serial open — brightness preview active"
-    } catch {
-        Warn2 "Could not open $comPort for brightness preview: $_"
-        $serial = $null
+        $runner = [runspacefactory]::CreateRunspace()
+        $runner.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $runner
+        [void]$ps.AddScript({
+            param($state, $port)
+            while (-not $state.Stop) {
+                $val = $state.Pending
+                if ($null -ne $val) {
+                    $state.Pending = $null   # claim it before writing
+                    try { if ($port.IsOpen) { $port.WriteLine("L:$val") } } catch {}
+                }
+                $cmd = $state.Cmd
+                if ($null -ne $cmd) {
+                    $state.Cmd = $null       # claim it before writing
+                    try { if ($port.IsOpen) { $port.WriteLine($cmd) } } catch {}
+                }
+                Start-Sleep -Milliseconds 40
+            }
+        }).AddArgument($state).AddArgument($s)
+        $handle = $ps.BeginInvoke()
+        return @{ Serial = $s; Ps = $ps; Runner = $runner; Handle = $handle }
     }
 
     $httpPort = 18742
@@ -672,20 +963,34 @@ function Show-SetupWizard([string]$comPort) {
         $resp.StatusCode      = $status
         $resp.ContentType     = $ct
         $resp.ContentLength64 = $bytes.Length
+        # The wizard always binds the same fixed port, so without this the
+        # browser can serve a stale cached copy of the HTML/JS from an
+        # earlier run of the installer -- e.g. an older build that predates
+        # a bug fix, making it look like the fix "didn't work".
+        $resp.Headers.Add('Cache-Control', 'no-store, no-cache, must-revalidate')
+        $resp.Headers.Add('Pragma', 'no-cache')
         try { $resp.OutputStream.Write($bytes, 0, $bytes.Length) } catch {}
         try { $resp.Close() } catch {}
     }
 
     try {
+        # Exactly one BeginGetContext must be outstanding at a time. Calling
+        # it again on every idle timeout (as a naive retry loop would) leaves
+        # each prior call pending forever uncompleted -- and HttpListener can
+        # satisfy ANY outstanding BeginGetContext when a request arrives, not
+        # necessarily the newest one this loop is watching. Over a 20-minute
+        # session that idles between wizard steps, that silently swallowed
+        # real requests (observed: POSTs timing out against a live listener).
+        $async = $listener.BeginGetContext($null, $null)
         while ([DateTime]::UtcNow -lt $deadline -and $null -eq $result) {
             $msLeft = [int](($deadline - [DateTime]::UtcNow).TotalMilliseconds)
             if ($msLeft -le 0) { break }
 
-            $async = $listener.BeginGetContext($null, $null)
-            $got   = $async.AsyncWaitHandle.WaitOne([Math]::Min($msLeft, 2000))
+            $got = $async.AsyncWaitHandle.WaitOne([Math]::Min($msLeft, 2000))
             if (-not $got) { continue }
 
             $ctx  = $listener.EndGetContext($async)
+            $async = $listener.BeginGetContext($null, $null)
             $req  = $ctx.Request
             $resp = $ctx.Response
             $resp.Headers.Add('Access-Control-Allow-Origin',  '*')
@@ -703,16 +1008,57 @@ function Show-SetupWizard([string]$comPort) {
                 'GET /' {
                     Write-Response $resp 'text/html; charset=utf-8' $htmlBytes
                 }
+                'GET /portcheck' {
+                    if ($deviceReady) {
+                        Write-Response $resp 'application/json' ([System.Text.Encoding]::UTF8.GetBytes('{"status":"ready"}'))
+                    } else {
+                        $found = Try-DetectPort
+                        if (-not $found) {
+                            Write-Response $resp 'application/json' ([System.Text.Encoding]::UTF8.GetBytes('{"status":"waiting"}'))
+                        } else {
+                            # Found it. A single poll response can't carry
+                            # two states ("found" then "flashed"), so this
+                            # just does the whole driver-check + flash
+                            # inline -- this poll cycle takes a few extra
+                            # seconds, which is fine for a polling UI with
+                            # nothing else for the user to do meanwhile.
+                            try {
+                                $script:IsCH340 = $found.IsCH340
+                                Ensure-CH340Driver
+                                Stop-Daemon
+                                Flash-Arduino $found.Port
+                                $preview = Start-BrightnessPreview $found.Port $serialState
+                                if ($preview) {
+                                    $serial       = $preview.Serial
+                                    $serialPs     = $preview.Ps
+                                    $serialRunner = $preview.Runner
+                                    $serialHandle = $preview.Handle
+                                }
+                                $deviceReady = $true
+                                Write-Response $resp 'application/json' ([System.Text.Encoding]::UTF8.GetBytes('{"status":"ready"}'))
+                            } catch {
+                                # ConvertTo-Json handles proper escaping (a
+                                # hand-rolled replace of just the quote
+                                # character would leave backslashes -- e.g.
+                                # from a Windows file path in the exception
+                                # message -- unescaped, producing invalid
+                                # JSON that JS's JSON.parse would reject).
+                                $errJson = @{ status = 'error'; message = $_.Exception.Message } | ConvertTo-Json -Compress
+                                Write-Response $resp 'application/json' ([System.Text.Encoding]::UTF8.GetBytes($errJson))
+                            }
+                        }
+                    }
+                }
                 'POST /brightness' {
                     try {
                         $reader = New-Object System.IO.StreamReader($req.InputStream,
                             [System.Text.Encoding]::UTF8)
                         $body = $reader.ReadToEnd()
                         $data = $body | ConvertFrom-Json
-                        $val  = [int]$data.value
-                        if ($serial -and $serial.IsOpen) {
-                            $serial.WriteLine("L:$val")
-                        }
+                        # Hand off to the background serial-writer runspace
+                        # and return immediately -- never block this HTTP
+                        # thread on the actual serial I/O (see notes above).
+                        $serialState.Pending = [int]$data.value
                     } catch {}
                     Write-Response $resp 'application/json' $okBytes
                 }
@@ -722,6 +1068,11 @@ function Show-SetupWizard([string]$comPort) {
                             [System.Text.Encoding]::UTF8)
                         $result = $reader.ReadToEnd() | ConvertFrom-Json
                     } catch { $result = [PSCustomObject]@{} }
+                    # Tell the device setup is done right as the browser shows its
+                    # own "All set" page, instead of leaving "Run setup to start" on
+                    # screen for however long Copy-AppFiles/Register-AutoStart/
+                    # Start-DaemonNow take to run afterward.
+                    if ($serial) { $serialState.Cmd = "D" }
                     Write-Response $resp 'application/json' $okBytes
                 }
                 default {
@@ -731,6 +1082,18 @@ function Show-SetupWizard([string]$comPort) {
         }
     } finally {
         try { $listener.Stop() } catch {}
+        if ($serialPs) {
+            $serialState.Stop = $true
+            try {
+                # Give the background writer a moment to notice Stop and
+                # finish any in-flight write, but don't wait indefinitely
+                # -- that would reintroduce exactly the kind of hang this
+                # background thread exists to isolate us from.
+                $null = $serialHandle.AsyncWaitHandle.WaitOne(1000)
+            } catch {}
+            try { $serialPs.Dispose() } catch {}
+            try { $serialRunner.Close() } catch {}
+        }
         if ($serial -and $serial.IsOpen) {
             try { $serial.Close() } catch {}
         }
@@ -896,18 +1259,25 @@ Write-Host ""
 
 Ensure-Python
 Ensure-PySerial
-Ensure-CH340Driver
-$detectedPort = Detect-Port
-Stop-Daemon
-Flash-Arduino $detectedPort
-Copy-AppFiles
 
 if ($City -or $NoWeather) {
-    # Non-interactive path: skip wizard, write config directly
+    # Non-interactive path: no browser UI to wait in, so this still needs
+    # the device plugged in up front (throws if it isn't).
+    Ensure-CH340Driver
+    $detectedPort = Detect-Port
+    Stop-Daemon
+    Flash-Arduino $detectedPort
+    Copy-AppFiles
     Write-DaemonConfig $null
     Patch-Settings
 } else {
-    $wizardResult = Show-SetupWizard $detectedPort
+    # Interactive path: Copy-AppFiles doesn't need the device, so it can
+    # happen immediately. The wizard's own "Connect your device" page owns
+    # detecting, driver-fixing and flashing it from here -- a brand-new
+    # machine that has never had the device plugged in doesn't need it
+    # connected before running the installer, only before finishing setup.
+    Copy-AppFiles
+    $wizardResult = Show-SetupWizard
     Write-DaemonConfig $wizardResult
     Patch-Settings
 }

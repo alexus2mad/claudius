@@ -21,6 +21,13 @@ After `SCREENSAVER_AFTER_SECONDS` of continuous IDLE the daemon stops the
 usage refresh and switches the LCD into clock-screensaver mode (`K:HH:MM`)
 instead.
 
+Pay-as-you-go / API-key accounts have no OAuth session and so no 5h/7d usage
+concept at all -- `_read_oauth_token()` simply finds nothing, the gauge/quota/
+limit commands never fire, and the device just runs the core WORKING/IDLE/
+screensaver/WAITING/PERMISSION screens. The one thing added for that case is
+a one-time on-screen notice (see the `payg_notified` block in `main()`) so
+the absence of usage data reads as "different plan" rather than "broken".
+
 Display power: the daemon listens for Windows monitor-power and system
 suspend/resume events (see monitor_power.py) and forwards `M0`/`M1` to the
 Arduino so the LCD blanks together with the PC monitors.
@@ -303,15 +310,36 @@ def _format_relative_reset(resets_at: str) -> str:
     return f"{s}s"
 
 
-def _format_absolute_reset(resets_at: str) -> str:
-    """'Sat 09:59' in local time."""
+def _format_hm_countdown(resets_at: str) -> str:
+    """'HH:MM' countdown to resets_at, for the 5h S_LIMIT display. '00:00' if
+    unknown or already past."""
     if not resets_at:
-        return ""
+        return "00:00"
     try:
-        dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00")).astimezone()
+        dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
     except Exception:
-        return ""
-    return dt.strftime("%a %H:%M")
+        return "00:00"
+    secs = max(0, int((dt - datetime.now(timezone.utc)).total_seconds()))
+    h, rem = divmod(secs, 3600)
+    m, _ = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}"
+
+
+def _format_dhm_countdown(resets_at: str) -> str:
+    """'Xd:HH:MM' countdown to resets_at, for the weekly S_LIMIT display.
+    Days is a single digit -- the 7-day window is never more than a few days
+    from reset -- so no zero-padding there. '0d:00:00' if unknown or past."""
+    if not resets_at:
+        return "0d:00:00"
+    try:
+        dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+    except Exception:
+        return "0d:00:00"
+    secs = max(0, int((dt - datetime.now(timezone.utc)).total_seconds()))
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m, _ = divmod(rem, 60)
+    return f"{d}d:{h:02d}:{m:02d}"
 
 
 def format_quota_line(usage: dict) -> str:
@@ -606,10 +634,11 @@ def alert_kick() -> None:
 
 # --- threshold alerts (audible) ---------------------------------------------
 # Pattern IDs are kept in lock-step with claude_status.ino's PATTERN_* table.
-PATTERN_5H_WARN   = 2
-PATTERN_7D_WARN   = 3
-PATTERN_5H_URGENT = 4
-PATTERN_7D_URGENT = 5
+PATTERN_5H_WARN    = 2
+PATTERN_7D_WARN    = 3
+PATTERN_5H_URGENT  = 4
+PATTERN_7D_URGENT  = 5
+PATTERN_ALERT_OVER = 8
 
 # Last-seen percentages. None = no baseline yet (first fetch after daemon
 # start), so we never chirp on cold-start alone — only on a real upward
@@ -619,8 +648,11 @@ _prev_seven_pct: "int | None" = None
 
 
 def quota_alert_commands(usage: dict) -> "list[bytes]":
-    """Return any `B:<id>\\n` payloads to push to the Arduino because a usage
-    line just crossed 75 % or 90 % upward. Updates the prev-% trackers as a
+    """Return any `U:`/`B:<id>\\n` payloads to push to the Arduino because a
+    usage line just crossed 75 % or 90 % upward. The U: toast is sent first
+    so the screen already explains itself by the time the beep (queued right
+    after) draws attention -- otherwise a threshold beep landing during the
+    idle screensaver has no visible cause. Updates the prev-% trackers as a
     side effect. Returns an empty list when nothing crossed.
     """
     global _prev_five_pct, _prev_seven_pct
@@ -630,9 +662,11 @@ def quota_alert_commands(usage: dict) -> "list[bytes]":
     if five is not None:
         if _prev_five_pct is not None:
             if _prev_five_pct < 90 <= five:
+                cmds.append(b"U:5h 90% reached\n")
                 cmds.append(f"B:{PATTERN_5H_URGENT}\n".encode("ascii"))
                 log(f"alert: 5h crossed 90% ({_prev_five_pct}→{five})")
             elif _prev_five_pct < 75 <= five:
+                cmds.append(b"U:5h 75% reached\n")
                 cmds.append(f"B:{PATTERN_5H_WARN}\n".encode("ascii"))
                 log(f"alert: 5h crossed 75% ({_prev_five_pct}→{five})")
         _prev_five_pct = five
@@ -641,9 +675,11 @@ def quota_alert_commands(usage: dict) -> "list[bytes]":
     if seven is not None:
         if _prev_seven_pct is not None:
             if _prev_seven_pct < 90 <= seven:
+                cmds.append(b"U:Weekly 90% reached\n")
                 cmds.append(f"B:{PATTERN_7D_URGENT}\n".encode("ascii"))
                 log(f"alert: 7d crossed 90% ({_prev_seven_pct}→{seven})")
             elif _prev_seven_pct < 75 <= seven:
+                cmds.append(b"U:Weekly 75% reached\n")
                 cmds.append(f"B:{PATTERN_7D_WARN}\n".encode("ascii"))
                 log(f"alert: 7d crossed 75% ({_prev_seven_pct}→{seven})")
         _prev_seven_pct = seven
@@ -775,10 +811,15 @@ def main() -> int:
     last_weather_kick = 0.0
     last_alert_kick = 0.0
     prev_alert_active = False
-    five_limit_notified = False
+    payg_no_token_count = 0   # consecutive quota-poll cycles with no OAuth token found
+    payg_notified = False     # one-shot: told the user usage limits aren't available
     cached_five: "dict" = {}
+    cached_seven: "dict" = {}
     last_quota_line_tick = 0.0
     last_quota_line = ""          # last Q: string sent — skip write if unchanged
+    limit_active = False          # showing the S_LIMIT display right now
+    last_limit_tick = 0.0
+    last_limit_text = ""          # last E: payload sent — skip write if unchanged
     last_gauge_pct: "int | None" = None  # last G: value — skip write if unchanged
     last_verb_tick = 0.0          # last verb rotation while WORKING
 
@@ -966,6 +1007,22 @@ def main() -> int:
             if now - last_quota_kick > QUOTA_REFRESH_SECONDS:
                 last_quota_kick = now
                 usage_kick()
+                # Pay-as-you-go / API-key accounts have no OAuth session, so
+                # this endpoint has nothing to report for them -- not an
+                # error, just a different plan with no 5h/7d limit concept.
+                # Once that's been true for a while (long enough to rule out
+                # a fresh install where ~/.claude/.credentials.json just
+                # hasn't been written yet), say so once rather than leaving
+                # the missing usage line unexplained forever.
+                if not payg_notified:
+                    if _read_oauth_token() is None:
+                        payg_no_token_count += 1
+                        if payg_no_token_count >= 3:
+                            payg_notified = True
+                            ser_write(b"U:Pay-as-you-go|no usage data shown\n")
+                            log("usage: no OAuth token found -- pay-as-you-go, limit monitoring disabled")
+                    else:
+                        payg_no_token_count = 0
 
             # 3c. Air raid alert polling (keyless community feeds, Ukraine only)
             if now - last_alert_kick > ALERT_REFRESH_SECONDS:
@@ -1005,19 +1062,20 @@ def main() -> int:
                 # progress bar stays current while Claude is active.
                 five = (usage_data.get("five_hour") or {})
                 cached_five = five
+                cached_seven = (usage_data.get("seven_day") or {})
                 pct = _pct(five)
                 if pct is not None and pct != last_gauge_pct:
-                    last_gauge_pct = pct
-                    ser_write(f"G:{pct}\n".encode("ascii"))
-                    if pct >= 100 and not five_limit_notified:
-                        five_limit_notified = True
-                        reset_str = _format_absolute_reset(_resets_at(five))
-                        msg = "5h limit reached" + (f" | resets {reset_str}" if reset_str else "")
-                        ser_write(f"N:{msg[:80]}\n".encode("ascii", "ignore"))
-                        log(f"limit: 5h at 100%, notified ({msg})")
-                    elif pct < 100 and five_limit_notified:
-                        five_limit_notified = False
+                    # Only latch pct as "sent" if the write actually went out.
+                    # Right after a fresh install the daemon is often still
+                    # racing to open the just-flashed port when this first
+                    # fetch resolves -- a dropped write must not be treated
+                    # as delivered, or the (usually unchanged) percentage on
+                    # every later poll would never win the dedup check above,
+                    # leaving the gauge blank for the rest of the session.
+                    if ser_write(f"G:{pct}\n".encode("ascii")):
+                        last_gauge_pct = pct
                 last_quota_line_tick = 0.0  # force immediate Q: redraw on new data
+                last_limit_tick = 0.0       # force immediate E: redraw on new data
 
             # Q: line refresh — independent tick so countdown updates every
             # QUOTA_REFRESH_SECONDS even when no fresh API data has arrived.
@@ -1027,9 +1085,45 @@ def main() -> int:
                 last_quota_line_tick = now
                 line = format_quota_line({"five_hour": cached_five})
                 if line != last_quota_line:
-                    last_quota_line = line
+                    # Same dropped-write concern as the gauge above: only
+                    # latch once the write actually succeeds.
                     if ser_write((f"Q:{line}\n").encode("ascii", "ignore")):
+                        last_quota_line = line
                         log(f"quota: {line}")
+
+            # E: limit-reached display — takes over the screen for as long as
+            # either usage window is fully spent, with a live countdown to
+            # the reset. Weekly takes priority: if both are capped, a fresh
+            # 5h window doesn't help while the week is still capped. Resent
+            # every QUOTA_REFRESH_SECONDS (independent of whether the raw %
+            # changed) purely so the countdown keeps ticking.
+            five_pct_now  = _pct(cached_five)  if cached_five  else None
+            seven_pct_now = _pct(cached_seven) if cached_seven else None
+            limit_kind = None
+            if seven_pct_now is not None and seven_pct_now >= 100:
+                limit_kind = "7"
+            elif five_pct_now is not None and five_pct_now >= 100:
+                limit_kind = "5"
+
+            if limit_kind and now - last_limit_tick > QUOTA_REFRESH_SECONDS:
+                last_limit_tick = now
+                if limit_kind == "7":
+                    countdown = _format_dhm_countdown(_resets_at(cached_seven))
+                    payload = f"E:Weekly limit reached|{countdown}\n"
+                else:
+                    countdown = _format_hm_countdown(_resets_at(cached_five))
+                    payload = f"E:5h limit reached|{countdown}\n"
+                if payload != last_limit_text:
+                    if ser_write(payload.encode("ascii", "ignore")):
+                        last_limit_text = payload
+                        limit_active = True
+                        log(f"limit: showing {payload.strip()}")
+            elif not limit_kind and limit_active:
+                limit_active = False
+                last_limit_text = ""
+                ser_write(f"B:{PATTERN_ALERT_OVER}\n".encode("ascii"))
+                ser_write(b"I\n")
+                log("limit: window reset, back to IDLE")
 
             # 4. Read anything the Arduino has to say (READY, SW:0/SW:1, ...)
             # A read failure means the device vanished mid-session — drop the
