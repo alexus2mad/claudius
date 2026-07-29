@@ -433,7 +433,12 @@ def load_config() -> None:
     """Load user-configurable settings from config.json. Missing file is fine."""
     global _weather_location, _brightness, _sound_enabled, _allclear_enabled
     try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as f:
+        # utf-8-sig, not utf-8: setup.ps1 writes config.json via PowerShell's
+        # `Set-Content -Encoding UTF8`, which (on Windows PowerShell 5.1)
+        # always prepends a BOM. Plain utf-8 chokes on that -- every fresh
+        # install was silently failing to load its own brightness/weather/
+        # prefs config and running on hardcoded defaults instead.
+        with CONFIG_PATH.open("r", encoding="utf-8-sig") as f:
             cfg = json.load(f)
     except FileNotFoundError:
         return
@@ -1206,10 +1211,22 @@ def main() -> int:
                         ser_write(datetime.now().strftime(
                             "R:%Y-%m-%d %H:%M:%S\n").encode("ascii"))
                         ser_write(f"L:{_brightness}\n".encode("ascii"))
+                        # Kick an immediate usage-limit fetch so the
+                        # screensaver's usage row and the IDLE quota line
+                        # have real data as soon as possible after boot,
+                        # rather than showing blank until whatever's left of
+                        # the standing QUOTA_REFRESH_SECONDS cadence elapses
+                        # -- previously that gap meant the limit info often
+                        # only appeared once the first WORKING hook fired.
+                        last_quota_kick = now
+                        usage_kick()
                         # Always push a fresh K: so the device leaves the
                         # boot-only header and lands in S_CLOCK with date /
                         # time / weather right away — even if no hook has
-                        # ever fired.
+                        # ever fired. (The usage field itself will still be
+                        # blank on this first send since the fetch above is
+                        # async; the "current_state is None" screensaver tick
+                        # below resends once it lands.)
                         last_clock_payload = ""
                         send_clock(datetime.now())
                         # If we already know the host's state (resync after

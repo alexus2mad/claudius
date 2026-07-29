@@ -7,12 +7,14 @@ Page up/down   : ±20 %
 Enter a number : set exact value, confirm with Enter
 q / Ctrl-C     : quit
 """
+import json
 import sys
 import tempfile
 from pathlib import Path
 
 STATE_FILE  = Path(tempfile.gettempdir()) / "claude_lcd_state.txt"
 CURRENT_FILE = Path(tempfile.gettempdir()) / "claude_lcd_brightness.txt"
+CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 
 
 def get_current() -> int:
@@ -22,10 +24,27 @@ def get_current() -> int:
         return 20
 
 
+def _persist_brightness(pct: int) -> None:
+    """Write brightness into config.json too, not just the live L: command --
+    otherwise the next daemon restart/device reboot re-applies config.json's
+    stale value (see lcd_daemon.py's load_config) and silently reverts
+    whatever was set here."""
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+    except Exception:
+        cfg = {}
+    cfg["brightness"] = pct
+    try:
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def apply(pct: int) -> int:
     pct = max(0, min(100, pct))
     STATE_FILE.write_text(f"L:{pct}\n", encoding="ascii")
     CURRENT_FILE.write_text(str(pct), encoding="ascii")
+    _persist_brightness(pct)
     return pct
 
 
