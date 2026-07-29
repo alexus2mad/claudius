@@ -526,6 +526,11 @@ input[type=range]::-moz-range-thumb{width:19px;height:19px;background:var(--acce
 <script>
 'use strict';
 const PORT = %%PORT%%;
+// Proves a request actually came from this page: the listener only accepts
+// this exact value on its state-changing endpoints, and (with no CORS
+// headers on the response) a page from another origin can't read this file
+// to learn it either. See setup.ps1's request loop for the server side.
+const TOKEN = '%%TOKEN%%';
 const STEP_LABELS = ['CONNECT','WELCOME','LOCATION','BRIGHTNESS','PREFERENCES','DONE'];
 
 // Surface any uncaught error on-screen instead of leaving a button that
@@ -568,7 +573,7 @@ async function api(path, body) {
   try {
     await fetch('http://localhost:' + PORT + path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Wizard-Token': TOKEN },
       body: JSON.stringify(body),
       signal: ctrl.signal
     });
@@ -629,7 +634,10 @@ async function pollConnect() {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 4000);
-    const r = await fetch('http://localhost:' + PORT + '/portcheck', { signal: ctrl.signal });
+    const r = await fetch('http://localhost:' + PORT + '/portcheck', {
+      headers: { 'X-Wizard-Token': TOKEN },
+      signal: ctrl.signal
+    });
     clearTimeout(timer);
     const data = await r.json();
     if (data.status === 'ready') {
@@ -948,7 +956,14 @@ function Show-SetupWizard {
         throw "Cannot bind to port $httpPort. Another setup may be running."
     }
 
-    $wizardHtml = $WIZARD_HTML.Replace('%%PORT%%', $httpPort.ToString())
+    # The wizard binds only to loopback, but that still means any other
+    # website open in the user's browser during this run can reach it --
+    # localhost servers are same-machine, not same-origin. A random per-run
+    # token, known only to the page this listener itself serves, is what
+    # stops a foreign page from driving /portcheck (re-flashes the device
+    # and kills the running daemon), /brightness, or /config blind.
+    $wizardToken = [guid]::NewGuid().ToString('N')
+    $wizardHtml = $WIZARD_HTML.Replace('%%PORT%%', $httpPort.ToString()).Replace('%%TOKEN%%', $wizardToken)
     $htmlBytes  = [System.Text.Encoding]::UTF8.GetBytes($wizardHtml)
     $okBytes    = [System.Text.Encoding]::UTF8.GetBytes('{"ok":true}')
 
@@ -993,15 +1008,30 @@ function Show-SetupWizard {
             $async = $listener.BeginGetContext($null, $null)
             $req  = $ctx.Request
             $resp = $ctx.Response
-            $resp.Headers.Add('Access-Control-Allow-Origin',  '*')
-            $resp.Headers.Add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-            $resp.Headers.Add('Access-Control-Allow-Headers', 'Content-Type')
+            # No Access-Control-Allow-Origin here on purpose: this listener is
+            # loopback-only, but loopback isn't same-origin -- any other site
+            # open in the browser during setup could otherwise read responses
+            # from it. The wizard page itself never needs CORS (it always
+            # calls its own origin), so omitting it costs the real UI nothing
+            # while stopping a foreign page from reading answers back.
 
             $method = $req.HttpMethod
             $url    = ($req.RawUrl -split '\?')[0]
 
             if ($method -eq 'OPTIONS') {
                 $resp.StatusCode = 200; $resp.Close(); continue
+            }
+
+            # /portcheck, /brightness, and /config all have side effects
+            # (flashing the board, killing the running daemon, writing to the
+            # serial port, finishing setup) -- require the per-run token so a
+            # page in another tab can't drive them blind. GET / stays open:
+            # it's how the page carrying the token loads in the first place.
+            if ($url -in @('/portcheck', '/brightness', '/config')) {
+                if ($req.Headers['X-Wizard-Token'] -ne $wizardToken) {
+                    Write-Response $resp 'text/plain' ([System.Text.Encoding]::UTF8.GetBytes('Forbidden')) 403
+                    continue
+                }
             }
 
             switch ("$method $url") {

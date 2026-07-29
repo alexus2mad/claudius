@@ -89,6 +89,14 @@ SCREENSAVER_AFTER_SECONDS = 5 * 60     # IDLE this long → switch LCD to clock
 VERB_ROTATE_SECONDS = 20               # rotate working verb this often
 
 
+def _serial_safe(text: str, max_len: int = 40) -> str:
+    """Strip CR/LF from text that will be embedded in a raw serial line.
+    The firmware's command reader splits on '\\n'/'\\r', so any untrusted
+    text carrying one -- e.g. a city name from a third-party geocoding API
+    -- could otherwise inject an extra command line."""
+    return text.replace("\r", " ").replace("\n", " ")[:max_len]
+
+
 def log(msg: str) -> None:
     try:
         try:
@@ -459,12 +467,17 @@ def load_config() -> None:
         log(f"config: ignored weather (not a dict): {w!r}")
         return
     try:
+        # city/alert_region round-trip through config.json from a third-party
+        # geocoding API response (see setup.ps1's map wizard) and get embedded
+        # directly into raw serial lines (K:/A: below) -- strip CR/LF so a
+        # crafted or malformed API response can never inject an extra command
+        # line into the newline-delimited protocol the firmware parses.
         _weather_location = {
-            "city":         str(w.get("city") or "?"),
+            "city":         _serial_safe(str(w.get("city") or "?")),
             "latitude":     float(w["latitude"]),
             "longitude":    float(w["longitude"]),
             "country_code": str(w.get("country_code") or "").lower(),
-            "alert_region": str(w.get("alert_region") or ""),
+            "alert_region": _serial_safe(str(w.get("alert_region") or "")),
         }
         log(f"config: weather -> {_weather_location['city']} "
             f"({_weather_location['latitude']}, {_weather_location['longitude']})"
