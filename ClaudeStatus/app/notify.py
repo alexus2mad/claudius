@@ -19,6 +19,11 @@ Usage (from Claude Code hooks):
                                       # when the LCD is actually in PERMISSION;
                                       # otherwise it's a no-op.
   python notify.py B                  # BOOT
+  python notify.py M                  # internal Claude Code command (e.g.
+                                      # /compact) that doesn't run any tool —
+                                      # fired from PreCompact so the LCD shows
+                                      # WORKING/"Compacting..." instead of
+                                      # sitting on IDLE while it happens.
 
 How it works:
   This script writes one or more status commands to a tiny state file. A
@@ -225,6 +230,14 @@ def main() -> int:
         cmds = [f"C:{_project_name()}"]
     elif tag == "B":
         cmds = ["B"]
+    elif tag == "M":
+        # PreCompact fires for both manual "/compact" and automatic
+        # context-window compaction — neither goes through PreToolUse or
+        # UserPromptSubmit, so without this the LCD would just sit on
+        # whatever it last showed (often IDLE) while the CLI is visibly
+        # busy compacting. Fixed label rather than a random spinner verb so
+        # it reads as a distinct, recognizable activity.
+        cmds = ["W:Compacting..."]
     else:
         return 0
 
@@ -234,7 +247,7 @@ def main() -> int:
         # the default "== Claude Code ==" (H: with empty payload does that).
         # C is conditional — the daemon decides whether anything changes, so
         # it must not carry an unconditional header reset.
-        if tag == "W":
+        if tag in ("W", "M"):
             cmds = [f"H:{_project_name()}"] + cmds
         elif tag != "C":
             cmds = ["H:"] + cmds

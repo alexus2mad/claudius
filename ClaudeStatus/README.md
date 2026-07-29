@@ -115,7 +115,7 @@ The script installs python3 / pyserial / avrdude through the system package
 manager (apt, dnf, pacman, zypper, or Homebrew on macOS — sudo may prompt),
 adds you to the `dialout`/`uucp` group on Linux if needed (a re-login makes
 it permanent; the script grants temporary access for the current session),
-flashes the firmware, and registers the same five hooks. Files go to
+flashes the firmware, and registers the same six hooks. Files go to
 `~/.local/share/claude-status/app`; autostart is a systemd user service on
 Linux and a LaunchAgent on macOS. The location wizard is a terminal prompt
 rather than the browser map.

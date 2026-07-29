@@ -11,7 +11,7 @@
 #   - Linux: makes sure you can open the serial port (dialout/uucp group)
 #   - finds the board by USB VID:PID and flashes hex/claude_status.hex
 #   - copies the daemon + hook scripts to ~/.local/share/claude-status/app
-#   - registers the five Claude Code hooks in ~/.claude/settings.json
+#   - registers the six Claude Code hooks in ~/.claude/settings.json
 #   - installs autostart (systemd user service / macOS LaunchAgent)
 #
 # CH340 note: Linux ships the ch341 driver in-kernel; macOS 11+ includes a

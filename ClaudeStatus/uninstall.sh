@@ -5,7 +5,7 @@
 #     CH340 serial chip until the device is replugged)
 #   - removes the systemd user service / LaunchAgent
 #   - restores ~/.claude/settings.json from the backup setup.sh made, or
-#     strips the five hooks by command-path match
+#     strips the six hooks by command-path match
 #   - deletes ~/.local/share/claude-status
 #   - does NOT touch python3, pyserial, avrdude, or the Arduino firmware
 

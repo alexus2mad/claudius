@@ -8,7 +8,7 @@
       kill can wedge the CH340 serial chip until the device is replugged).
     - Unregisters the "ClaudeStatusDaemon" Task Scheduler entry.
     - Restores ~/.claude/settings.json from the .claudestatus_backup that
-      setup.ps1 wrote (or, if no backup exists, removes the five hooks
+      setup.ps1 wrote (or, if no backup exists, removes the six hooks
       we added by command-path match).
     - Deletes %LOCALAPPDATA%\ClaudeStatus.
     - Does NOT touch Python, Node, pyserial, or the Arduino firmware.
@@ -79,7 +79,7 @@ if (Test-Path $backupPath) {
         $obj = $raw | ConvertFrom-Json
         if ($obj.PSObject.Properties.Match('hooks')) {
             $needle = (Join-Path $installDir 'app').Replace('\','/')
-            foreach ($evt in @('UserPromptSubmit','PreToolUse','PostToolUse','Notification','Stop')) {
+            foreach ($evt in @('UserPromptSubmit','PreToolUse','PostToolUse','Notification','Stop','PreCompact')) {
                 $entries = $obj.hooks.$evt
                 if ($entries) {
                     $kept = @()

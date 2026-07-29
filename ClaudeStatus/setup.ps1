@@ -21,7 +21,7 @@
         with bundled avrdude (tries both bootloader baud rates) — this and the
         driver check happen once the wizard's Connect page detects the device
       - Copies daemon / hook scripts to %LOCALAPPDATA%\ClaudeStatus\app\
-      - Patches ~/.claude/settings.json to register the five Claude Code hooks
+      - Patches ~/.claude/settings.json to register the six Claude Code hooks
       - Registers a Task Scheduler entry so the daemon starts at logon
 
 .PARAMETER Port
@@ -1261,6 +1261,7 @@ function Patch-Settings {
     $obj.hooks | Add-Member -Force -NotePropertyName 'PostToolUse'      -NotePropertyValue @(Build-HookBlock "pythonw `"$notify`" C"  '')
     $obj.hooks | Add-Member -Force -NotePropertyName 'Notification'     -NotePropertyValue @(Build-HookBlock "pythonw `"$notify`" P"  $null)
     $obj.hooks | Add-Member -Force -NotePropertyName 'Stop'             -NotePropertyValue @(Build-HookBlock "pythonw `"$notify`" I"  $null)
+    $obj.hooks | Add-Member -Force -NotePropertyName 'PreCompact'       -NotePropertyValue @(Build-HookBlock "pythonw `"$notify`" M"  $null)
 
     ($obj | ConvertTo-Json -Depth 30) | Set-Content -Path $settingsPath -Encoding UTF8
     Done "Hooks registered"

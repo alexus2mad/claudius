@@ -7,7 +7,7 @@ Helper for setup.sh / uninstall.sh (Linux + macOS). Subcommands:
   uaregion <lat> <lon>         print the Ukrainian oblast name (for alerts)
   writeconfig <path> <city> <lat> <lon> <cc> <region> <brightness> <sound> <allclear>
                                write config.json ("-" city disables weather)
-  patchhooks <appdir>          register the five Claude Code hooks (python3)
+  patchhooks <appdir>          register the six Claude Code hooks (python3)
   striphooks <appdir>          remove our hooks (uninstall, no-backup path)
   stopdaemon                   graceful daemon stop via exit file; hard kill
                                only if it ignores the request for 5 s
@@ -105,7 +105,7 @@ def writeconfig(path: str, city: str, lat: str, lon: str, cc: str,
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 BACKUP = SETTINGS + ".claudestatus_backup"
 HOOK_EVENTS = ("UserPromptSubmit", "PreToolUse", "PostToolUse",
-               "Notification", "Stop")
+               "Notification", "Stop", "PreCompact")
 
 
 def _load_settings() -> dict:
@@ -140,6 +140,7 @@ def patchhooks(appdir: str) -> int:
     hooks["PostToolUse"] = block(f"{notify} C", "")
     hooks["Notification"] = block(f"{notify} P", None)
     hooks["Stop"] = block(f"{notify} I", None)
+    hooks["PreCompact"] = block(f"{notify} M", None)
     _save_settings(data)
     return 0
 
