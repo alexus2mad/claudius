@@ -847,9 +847,12 @@ def main() -> int:
     last_verb_tick = 0.0          # last verb rotation while WORKING
 
     def send_clock(now_dt: datetime) -> None:
-        """Push the multi-row screensaver payload as K:time|date|temp.
-        Re-sends only when the rendered string actually changes (covers both
-        minute roll-over and weather refresh)."""
+        """Push the multi-row screensaver payload as K:time|date|temp|usage.
+        Re-sends only when the rendered string actually changes (covers
+        minute roll-over, weather refresh, and usage pct/countdown ticks).
+        The usage field is blank for pay-as-you-go accounts (no cached_five
+        data), which the Arduino side renders as an empty row rather than a
+        stale "== Claude Code ==" header."""
         nonlocal last_clock_payload
         hhmm = now_dt.strftime("%H:%M")
         date_str = now_dt.strftime("%a, %b %d")
@@ -859,14 +862,20 @@ def main() -> int:
             temp_str = f"{_weather_location['city']} {temp}\xdfC"
         else:
             temp_str = ""
-        payload = f"{hhmm}|{date_str}|{temp_str}"
+        usage_pct = _pct(cached_five) if cached_five else None
+        if usage_pct is not None:
+            countdown = _format_hm_countdown(_resets_at(cached_five))
+            usage_str = f"{usage_pct}% resets in {countdown}"[:20]
+        else:
+            usage_str = ""
+        payload = f"{hhmm}|{date_str}|{temp_str}|{usage_str}"
         if payload == last_clock_payload:
             return
         if ser_write(f"K:{payload}\n".encode("latin-1", "ignore")):
             last_clock_payload = payload
             # log with the printable ° in place of the raw byte
             log(f"clock: {hhmm} | {date_str} | "
-                f"{temp_str.replace(chr(0xdf), chr(0xb0))}")
+                f"{temp_str.replace(chr(0xdf), chr(0xb0))} | {usage_str}")
 
     def enter_idle_tracking() -> None:
         nonlocal idle_since, screensaver_active, last_clock_payload
@@ -946,16 +955,26 @@ def main() -> int:
                         # the payload). Any other state: no-op. Never
                         # forwarded to the Arduino, which has no C command.
                         if current_state == "X":
-                            proj = ln[2:] if ln[1:2] == ":" else ""
-                            verb = random.choice(VERBS) if VERBS else ""
-                            ser_write(f"H:{proj}\n".encode("ascii", "ignore"))
-                            ser_write((f"W:{verb}...\n" if verb else "W\n")
-                                      .encode("ascii", "ignore"))
                             current_state = "W"
-                            log("permission answered (PostToolUse) → WORKING")
+                            if not limit_active:
+                                proj = ln[2:] if ln[1:2] == ":" else ""
+                                verb = random.choice(VERBS) if VERBS else ""
+                                ser_write(f"H:{proj}\n".encode("ascii", "ignore"))
+                                ser_write((f"W:{verb}...\n" if verb else "W\n")
+                                          .encode("ascii", "ignore"))
+                                log("permission answered (PostToolUse) → WORKING")
                         continue
                     if ln[0] in "IWPXBO":
                         current_state = ln[0]
+                    # While a usage window is fully spent, the S_LIMIT screen
+                    # owns the display -- hook-driven commands (Claude Code
+                    # keeps firing UserPromptSubmit/PreToolUse/Stop even while
+                    # rate-limited) would otherwise flip the Arduino back to
+                    # WORKING/IDLE/etc. with a stale 100% gauge. Still track
+                    # current_state above so behavior resumes correctly once
+                    # the window resets, just don't forward to the device.
+                    if limit_active:
+                        continue
                     # A failed write means the device is unplugged; state is
                     # still tracked and replayed by the READY resync when the
                     # board comes back, so just carry on.
@@ -992,28 +1011,36 @@ def main() -> int:
                             log("→ OFFLINE (no session at boot)")
                 elif online_now != online_known:
                     online_known = online_now
+                    # Same reasoning as the hook-forwarding block above: while
+                    # S_LIMIT owns the display, don't let an online/offline
+                    # flip kick the Arduino back to O/I. Track current_state
+                    # so things resume correctly once the window resets.
                     if not online_now:
-                        if ser_write(b"O\n"):
-                            current_state = "O"
-                            leave_idle_tracking()
-                            log("→ OFFLINE (session ended)")
+                        current_state = "O"
+                        if not limit_active:
+                            if ser_write(b"O\n"):
+                                leave_idle_tracking()
+                                log("→ OFFLINE (session ended)")
                     else:
-                        # session came back; flip to IDLE so the next hook can
-                        # set the real state (quota refresh kicks in too).
-                        if ser_write(b"I\n"):
-                            current_state = "I"
-                            enter_idle_tracking()
-                            log("→ ONLINE (session started)")
+                        current_state = "I"
+                        if not limit_active:
+                            # session came back; flip to IDLE so the next hook
+                            # can set the real state (quota refresh kicks in too).
+                            if ser_write(b"I\n"):
+                                enter_idle_tracking()
+                                log("→ ONLINE (session started)")
 
             # 3a. Screensaver: after SCREENSAVER_AFTER_SECONDS in IDLE, show clock.
-            if (current_state == "I" and idle_since is not None
+            # Suppressed while S_LIMIT owns the display -- same reasoning as
+            # the hook-forwarding block above.
+            if (not limit_active and current_state == "I" and idle_since is not None
                     and now - idle_since >= SCREENSAVER_AFTER_SECONDS):
                 if not screensaver_active:
                     screensaver_active = True
                     last_clock_payload = ""
                     log("→ screensaver (idle 5 min)")
                 send_clock(datetime.now())
-            elif current_state is None:
+            elif not limit_active and current_state is None:
                 # Pre-host display — keep refreshing the screensaver until
                 # the first hook lands. send_clock dedupes by payload so
                 # this is a no-op until the minute rolls or weather lands.
@@ -1053,7 +1080,8 @@ def main() -> int:
                 alert_kick()
 
             # 3d. Verb rotation — pick a new spinner verb every 20 s while WORKING
-            if current_state == "W" and now - last_verb_tick > VERB_ROTATE_SECONDS:
+            if (current_state == "W" and not limit_active
+                    and now - last_verb_tick > VERB_ROTATE_SECONDS):
                 last_verb_tick = now
                 verb = random.choice(VERBS)
                 ser_write(f"W:{verb}...\n".encode("ascii", "ignore"))
@@ -1145,7 +1173,11 @@ def main() -> int:
                 limit_active = False
                 last_limit_text = ""
                 ser_write(f"B:{PATTERN_ALERT_OVER}\n".encode("ascii"))
-                ser_write(b"I\n")
+                if ser_write(b"I\n"):
+                    current_state = "I"
+                    enter_idle_tracking()
+                    last_quota_line = ""
+                    last_gauge_pct = None
                 log("limit: window reset, back to IDLE")
 
             # 4. Read anything the Arduino has to say (READY, SW:0/SW:1, ...)
