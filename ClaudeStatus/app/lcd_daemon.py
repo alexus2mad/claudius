@@ -73,6 +73,8 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.nam
 STATE_FILE = Path(tempfile.gettempdir()) / "claude_lcd_state.txt"
 PID_FILE = Path(tempfile.gettempdir()) / "claude_lcd_daemon.pid"
 LOG_FILE = Path(tempfile.gettempdir()) / "claude_lcd_daemon.log"
+LOG_FILE_OLD = LOG_FILE.with_name(LOG_FILE.name + ".old")
+LOG_MAX_BYTES = 2 * 1024 * 1024  # rotate past this so the log can't grow unbounded
 # Touch this file to make the daemon exit cleanly (port closed in finally).
 # Force-killing the process instead can wedge the CH340's open handle so
 # badly that every later open fails until the device is physically replugged.
@@ -89,6 +91,14 @@ VERB_ROTATE_SECONDS = 20               # rotate working verb this often
 
 def log(msg: str) -> None:
     try:
+        try:
+            # Single-backup rotation: keep the log from growing unbounded
+            # over weeks of always-on autostart use without pulling in
+            # logging.handlers for what's otherwise a plain append-only file.
+            if LOG_FILE.stat().st_size > LOG_MAX_BYTES:
+                LOG_FILE.replace(LOG_FILE_OLD)
+        except FileNotFoundError:
+            pass
         with LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     except Exception:
