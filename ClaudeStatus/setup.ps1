@@ -1102,7 +1102,22 @@ function Show-SetupWizard {
                     # own "All set" page, instead of leaving "Run setup to start" on
                     # screen for however long Copy-AppFiles/Register-AutoStart/
                     # Start-DaemonNow take to run afterward.
-                    if ($serial) { $serialState.Cmd = "D" }
+                    if ($serial) {
+                        $serialState.Cmd = "D"
+                        # This is the last request of the wizard loop: setting
+                        # $result below makes the outer while exit almost
+                        # immediately, and its `finally` tears down the
+                        # background writer by setting Stop -- which races
+                        # ahead of that writer's 40ms poll interval and was
+                        # silently dropping "D" essentially every time. Wait
+                        # (bounded, not indefinitely -- this doesn't touch the
+                        # serial port itself, just a shared variable) for the
+                        # writer to actually pick it up before moving on.
+                        $waitUntil = [DateTime]::UtcNow.AddMilliseconds(500)
+                        while ($null -ne $serialState.Cmd -and [DateTime]::UtcNow -lt $waitUntil) {
+                            Start-Sleep -Milliseconds 20
+                        }
+                    }
                     Write-Response $resp 'application/json' $okBytes
                 }
                 default {
