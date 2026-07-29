@@ -851,8 +851,8 @@ def main() -> int:
         Re-sends only when the rendered string actually changes (covers
         minute roll-over, weather refresh, and usage pct/countdown ticks).
         The usage field is blank for pay-as-you-go accounts (no cached_five
-        data), which the Arduino side renders as an empty row rather than a
-        stale "== Claude Code ==" header."""
+        data); the Arduino side falls back to "== Claude Code ==" on that
+        row rather than leaving it blank."""
         nonlocal last_clock_payload
         hhmm = now_dt.strftime("%H:%M")
         date_str = now_dt.strftime("%a, %b %d")
