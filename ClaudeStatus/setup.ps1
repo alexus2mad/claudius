@@ -256,7 +256,7 @@ $WIZARD_HTML = @'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ClaudeStatus — Setup</title>
+<title>Claudius I — Setup</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 /* Design tokens. Previously colors/spacing were hand-picked per rule (and a
@@ -436,7 +436,7 @@ input[type=range]::-moz-range-thumb{width:19px;height:19px;background:var(--acce
 
   <!-- 0: Connect -->
   <div class="page active" id="p-connect">
-    <div class="logo">Claude<b>Status</b></div>
+    <div class="logo">Claudius <b>I</b> Setup</div>
     <div class="connect-spinner" id="connect-spinner"></div>
     <p class="connect-status" id="connect-status">Looking for your device…</p>
     <p class="tagline">Plug the display into a USB-C port. This page updates on its own once it's found — no need to click anything.</p>
@@ -444,7 +444,7 @@ input[type=range]::-moz-range-thumb{width:19px;height:19px;background:var(--acce
 
   <!-- 1: Welcome -->
   <div class="page" id="p-welcome">
-    <div class="logo">Claude<b>Status</b></div>
+    <div class="logo">Claudius <b>I</b> Setup</div>
     <p class="tagline">Your Arduino LCD display is connected and ready. This wizard configures location, display brightness, and alert preferences — takes about 2 minutes.</p>
     <div class="device-hint">Device detected &amp; flashed &nbsp;·&nbsp; <code>claude_status.hex</code></div>
   </div>
