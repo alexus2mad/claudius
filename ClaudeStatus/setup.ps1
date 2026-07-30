@@ -438,14 +438,14 @@ input[type=range]::-moz-range-thumb{width:19px;height:19px;background:var(--acce
   <div class="page active" id="p-connect">
     <div class="logo">Claudius <b>I</b> Setup</div>
     <div class="connect-spinner" id="connect-spinner"></div>
-    <p class="connect-status" id="connect-status">Looking for your device…</p>
-    <p class="tagline">Plug the display into a USB-C port. This page updates on its own once it's found — no need to click anything.</p>
+    <p class="connect-status" id="connect-status">Connecting to your device…</p>
+    <p class="tagline" id="connect-tagline">It's rebooting after setup. This page updates on its own once it's found — no need to click anything.</p>
   </div>
 
   <!-- 1: Welcome -->
   <div class="page" id="p-welcome">
     <div class="logo">Claudius <b>I</b> Setup</div>
-    <p class="tagline">Your Arduino LCD display is connected and ready. This wizard configures location, display brightness, and alert preferences — takes about 2 minutes.</p>
+    <p class="tagline">Claudius device is connected. This wizard configures location, display brightness, and alert preferences — takes about 2 minutes.</p>
     <div class="device-hint">Device detected &amp; flashed &nbsp;·&nbsp; <code>claude_status.hex</code></div>
   </div>
 
@@ -624,13 +624,28 @@ document.getElementById('btn-next').addEventListener('click', async ()=>{
 // ── Connect (step 0) ─────────────────────────────────────────────────────────
 let connectPollTimer = null;
 let connectPolling = false;
+let connectStartedAt = null;
+const CONNECT_USB_PROMPT_MS = 20000;
 function startConnectPoll() {
   if (connectPolling) return;
   connectPolling = true;
+  connectStartedAt = Date.now();
   pollConnect();
 }
 async function pollConnect() {
   const statusEl = document.getElementById('connect-status');
+  const taglineEl = document.getElementById('connect-tagline');
+  // For the first CONNECT_USB_PROMPT_MS assume the device is still rebooting
+  // after the flash step -- only ask the user to physically plug it in via
+  // USB-C once it's been missing long enough that that's the more likely
+  // explanation.
+  const stillBooting = (Date.now() - connectStartedAt) < CONNECT_USB_PROMPT_MS;
+  const waitingStatus = stillBooting
+    ? 'Connecting to your device…'
+    : 'Still waiting for your device…';
+  const waitingTagline = stillBooting
+    ? "It's rebooting after setup. This page updates on its own once it's found — no need to click anything."
+    : 'Plug the display into a USB-C port. This page updates on its own once it\'s found — no need to click anything.';
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 4000);
@@ -653,13 +668,15 @@ async function pollConnect() {
         + ' — unplug and replug it to try again.';
     } else {
       statusEl.classList.remove('error');
-      statusEl.textContent = 'Waiting for your device — plug it in via USB-C…';
+      statusEl.textContent = waitingStatus;
+      taglineEl.textContent = waitingTagline;
     }
   } catch (_) {
     // Local server not answering yet/right now -- keep it low-key and
     // just keep polling rather than treating this as a fatal error.
     statusEl.classList.remove('error');
-    statusEl.textContent = 'Waiting for your device — plug it in via USB-C…';
+    statusEl.textContent = waitingStatus;
+    taglineEl.textContent = waitingTagline;
   }
   connectPollTimer = setTimeout(pollConnect, 1500);
 }
