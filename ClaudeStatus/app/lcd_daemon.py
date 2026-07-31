@@ -389,6 +389,18 @@ def format_quota_line(usage: dict) -> str:
     return sess[:20]
 
 
+def format_weekly_line(seven: dict) -> str:
+    """20-char-max LCD line for the 7-day window, cached on the device (Y:)
+    for the button's long-press peek. "in Xd:HH:MM" rather than Q:'s
+    "resets in HH:MM" wording -- the day-inclusive countdown is longer, and
+    the peek's own "7-DAY USAGE" header already gives the wording context."""
+    pct = _pct(seven)
+    if pct is None:
+        return ""
+    countdown = _format_dhm_countdown(_resets_at(seven))
+    return f"{pct}% in {countdown}"[:20]
+
+
 # --- weather (Open-Meteo, no auth, free) ------------------------------------
 WEATHER_REFRESH_SECONDS = 300       # 5 min cadence
 WEATHER_THREAD_TIMEOUT  = 30        # abandon a hung fetch thread after this
@@ -858,6 +870,7 @@ def main() -> int:
     cached_seven: "dict" = {}
     last_quota_line_tick = 0.0
     last_quota_line = ""          # last Q: string sent — skip write if unchanged
+    last_weekly_line = ""         # last Y: string sent — skip write if unchanged
     limit_active = False          # showing the S_LIMIT display right now
     last_limit_tick = 0.0
     last_limit_text = ""          # last E: payload sent — skip write if unchanged
@@ -1137,6 +1150,13 @@ def main() -> int:
                 five = (usage_data.get("five_hour") or {})
                 cached_five = five
                 cached_seven = (usage_data.get("seven_day") or {})
+                # 7-day line — cached on the device (Y:) for the button's
+                # long-press peek. Sent in all states, same as the gauge,
+                # so it's fresh whenever the button actually gets pressed.
+                weekly_line = format_weekly_line(cached_seven)
+                if weekly_line and weekly_line != last_weekly_line:
+                    if ser_write(f"Y:{weekly_line}\n".encode("ascii", "ignore")):
+                        last_weekly_line = weekly_line
                 pct = _pct(five)
                 if pct is not None and pct != last_gauge_pct:
                     # Only latch pct as "sent" if the write actually went out.
