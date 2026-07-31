@@ -1129,6 +1129,13 @@ def main() -> int:
                         if payg_no_token_count >= 3:
                             payg_notified = True
                             ser_write(b"U:Pay-as-you-go|no usage data shown\n")
+                            # Q: (not just the one-time toast above) so the
+                            # IDLE screen's row 3 reads "Pay-as-you-go"
+                            # instead of the Arduino's own "awaiting limit
+                            # info" fallback, which would otherwise imply
+                            # data is merely delayed rather than nonexistent
+                            # for this plan.
+                            ser_write(b"Q:Pay-as-you-go\n")
                             log("usage: no OAuth token found -- pay-as-you-go, limit monitoring disabled")
                     else:
                         payg_no_token_count = 0
