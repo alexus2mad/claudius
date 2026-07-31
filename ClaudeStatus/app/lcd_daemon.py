@@ -694,6 +694,11 @@ PATTERN_7D_URGENT  = 5
 PATTERN_ALERT_OVER = 8
 PATTERN_QUICK_DONE = 9
 
+# Below this many seconds of WORKING, a completed task gets the short
+# PATTERN_QUICK_DONE beep instead of the full PATTERN_DONE fanfare (see the
+# "I" handling in main()'s hook-forwarding loop).
+SHORT_TASK_SECONDS = 3.0
+
 # Last-seen percentages. None = no baseline yet (first fetch after daemon
 # start), so we never chirp on cold-start alone — only on a real upward
 # crossing observed between two consecutive fetches.
@@ -878,6 +883,7 @@ def main() -> int:
     last_limit_text = ""          # last E: payload sent — skip write if unchanged
     last_gauge_pct: "int | None" = None  # last G: value — skip write if unchanged
     last_verb_tick = 0.0          # last verb rotation while WORKING
+    working_started_at = 0.0      # when current_state most recently became "W"
 
     def send_clock(now_dt: datetime) -> None:
         """Push the multi-row screensaver payload as K:time|date|temp|usage.
@@ -984,7 +990,6 @@ def main() -> int:
                 lines = [ln.strip() for ln in payload.splitlines() if ln.strip()]
                 log(f"write: {lines}")
                 prev_state = current_state
-                saw_idle_this_batch = False
                 for ln in lines:
                     if ln[0] == "C":
                         # PostToolUse fired: a tool completed, so a pending
@@ -995,6 +1000,7 @@ def main() -> int:
                         # forwarded to the Arduino, which has no C command.
                         if current_state == "X":
                             current_state = "W"
+                            working_started_at = now
                             if not limit_active:
                                 proj = ln[2:] if ln[1:2] == ":" else ""
                                 verb = random.choice(VERBS) if VERBS else ""
@@ -1004,13 +1010,10 @@ def main() -> int:
                                 log("permission answered (PostToolUse) → WORKING")
                         continue
                     # "B:<id>" is a beep-pattern command, not the bare "B"
-                    # boot state -- exclude it so a beep line (e.g. the
-                    # quick-done tap below) doesn't get mistaken for the
-                    # Arduino entering S_BOOT.
+                    # boot state -- exclude it so a beep line doesn't get
+                    # mistaken for the Arduino entering S_BOOT.
                     if ln[0] in "IWPXBO" and not ln.startswith("B:"):
                         current_state = ln[0]
-                        if ln == "I":
-                            saw_idle_this_batch = True
                     # While a usage window is fully spent, the S_LIMIT screen
                     # owns the display -- hook-driven commands (Claude Code
                     # keeps firing UserPromptSubmit/PreToolUse/Stop even while
@@ -1020,21 +1023,30 @@ def main() -> int:
                     # the window resets, just don't forward to the device.
                     if limit_active:
                         continue
+                    if ln == "I":
+                        # Was this task short enough that the fanfare would
+                        # feel disproportionate? Two cases: (a) the daemon
+                        # never even saw the matching "W" -- it landed in the
+                        # same 100ms poll window as this "I" and got
+                        # overwritten in the state file before being read
+                        # (prev_state is still "I" from before); or (b) the
+                        # daemon did see "W", but not long enough ago. Either
+                        # way, send J (enter IDLE, suppress the automatic
+                        # chime) plus our own short beep instead of I.
+                        elapsed = now - working_started_at
+                        is_short = (prev_state == "I") or (
+                            prev_state == "W" and elapsed < SHORT_TASK_SECONDS
+                        )
+                        if is_short:
+                            ser_write(b"J\n")
+                            ser_write(f"B:{PATTERN_QUICK_DONE}\n".encode("ascii"))
+                        else:
+                            ser_write(b"I\n")
+                        continue
                     # A failed write means the device is unplugged; state is
                     # still tracked and replayed by the READY resync when the
                     # board comes back, so just carry on.
                     ser_write((ln + "\n").encode("ascii", "ignore"))
-                # A task that completed fast enough to have its "I" land in
-                # the same 100ms poll window as its "W" leaves the Arduino's
-                # own state unchanged (still "I" from before) -- W got
-                # overwritten in the state file before we ever read it, so
-                # setState() on the Arduino never saw a real WORKING->IDLE
-                # transition and its completion chime silently didn't fire.
-                # Detecting that precisely (rather than guessing at a
-                # wall-clock threshold) avoids ever double-beeping: this only
-                # fires when the Arduino's own state genuinely never changed.
-                if saw_idle_this_batch and prev_state == "I" and not limit_active:
-                    ser_write(f"B:{PATTERN_QUICK_DONE}\n".encode("ascii"))
                 # Idle-tracking transitions
                 if current_state == "I" and prev_state != "I":
                     enter_idle_tracking()
@@ -1048,6 +1060,7 @@ def main() -> int:
                 # rotation happens VERB_ROTATE_SECONDS after the hook fires.
                 if current_state == "W" and prev_state != "W":
                     last_verb_tick = now
+                    working_started_at = now
 
             # 2. Online/offline detection
             if now - last_online_check > ONLINE_CHECK_SECONDS:
