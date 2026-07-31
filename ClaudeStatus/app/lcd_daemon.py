@@ -694,11 +694,6 @@ PATTERN_7D_URGENT  = 5
 PATTERN_ALERT_OVER = 8
 PATTERN_QUICK_DONE = 9
 
-# Below this many seconds of WORKING, a completed task gets the short
-# PATTERN_QUICK_DONE beep instead of the full PATTERN_DONE fanfare (see the
-# "I" handling in main()'s hook-forwarding loop).
-SHORT_TASK_SECONDS = 3.0
-
 # Last-seen percentages. None = no baseline yet (first fetch after daemon
 # start), so we never chirp on cold-start alone — only on a real upward
 # crossing observed between two consecutive fetches.
@@ -883,7 +878,6 @@ def main() -> int:
     last_limit_text = ""          # last E: payload sent — skip write if unchanged
     last_gauge_pct: "int | None" = None  # last G: value — skip write if unchanged
     last_verb_tick = 0.0          # last verb rotation while WORKING
-    working_started_at = 0.0      # when current_state most recently became "W"
 
     def send_clock(now_dt: datetime) -> None:
         """Push the multi-row screensaver payload as K:time|date|temp|usage.
@@ -1000,7 +994,6 @@ def main() -> int:
                         # forwarded to the Arduino, which has no C command.
                         if current_state == "X":
                             current_state = "W"
-                            working_started_at = now
                             if not limit_active:
                                 proj = ln[2:] if ln[1:2] == ":" else ""
                                 verb = random.choice(VERBS) if VERBS else ""
@@ -1024,24 +1017,19 @@ def main() -> int:
                     if limit_active:
                         continue
                     if ln == "I":
-                        # Was this task short enough that the fanfare would
-                        # feel disproportionate? Two cases: (a) the daemon
-                        # never even saw the matching "W" -- it landed in the
-                        # same 100ms poll window as this "I" and got
-                        # overwritten in the state file before being read
-                        # (prev_state is still "I" from before); or (b) the
-                        # daemon did see "W", but not long enough ago. Either
-                        # way, send J (enter IDLE, suppress the automatic
-                        # chime) plus our own short beep instead of I.
-                        elapsed = now - working_started_at
-                        is_short = (prev_state == "I") or (
-                            prev_state == "W" and elapsed < SHORT_TASK_SECONDS
-                        )
-                        if is_short:
-                            ser_write(b"J\n")
+                        # The Arduino now plays PATTERN_QUICK_DONE
+                        # automatically on every real WORKING->IDLE
+                        # transition, so plain "I" already does the right
+                        # thing in the normal case. The one gap: if the
+                        # daemon never even saw the matching "W" (it landed
+                        # in the same 100ms poll window as this "I" and got
+                        # overwritten in the state file before being read --
+                        # prev_state is still "I" from before), the Arduino's
+                        # own state never changes, so its automatic chime
+                        # can't fire either. Send the same beep manually.
+                        ser_write(b"I\n")
+                        if prev_state == "I":
                             ser_write(f"B:{PATTERN_QUICK_DONE}\n".encode("ascii"))
-                        else:
-                            ser_write(b"I\n")
                         continue
                     # A failed write means the device is unplugged; state is
                     # still tracked and replayed by the READY resync when the
@@ -1060,7 +1048,6 @@ def main() -> int:
                 # rotation happens VERB_ROTATE_SECONDS after the hook fires.
                 if current_state == "W" and prev_state != "W":
                     last_verb_tick = now
-                    working_started_at = now
 
             # 2. Online/offline detection
             if now - last_online_check > ONLINE_CHECK_SECONDS:
