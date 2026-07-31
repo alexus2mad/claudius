@@ -328,6 +328,19 @@ def _format_relative_reset(resets_at: str) -> str:
     return f"{s}s"
 
 
+def _window_has_reset(resets_at: str) -> bool:
+    """True once resets_at is in the past (or missing/unparsable) -- signals
+    that cached_five/cached_seven is stale: the window it describes has
+    already reset, and no fresh fetch has arrived yet to replace it."""
+    if not resets_at:
+        return True
+    try:
+        dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+    except Exception:
+        return True
+    return dt <= datetime.now(timezone.utc)
+
+
 def _format_hm_countdown(resets_at: str) -> str:
     """'HH:MM' countdown to resets_at, for the 5h S_LIMIT display. '00:00' if
     unknown or already past."""
@@ -857,7 +870,10 @@ def main() -> int:
         minute roll-over, weather refresh, and usage pct/countdown ticks).
         The usage field is blank for pay-as-you-go accounts (no cached_five
         data); the Arduino side falls back to "== Claude Code ==" on that
-        row rather than leaving it blank."""
+        row rather than leaving it blank. It's also blank once cached_five's
+        window has already reset and no fresh fetch has replaced it yet --
+        otherwise a long idle stretch (host asleep, API rate-limited, etc.)
+        would freeze the row at a stale "62% resets in 00:00" forever."""
         nonlocal last_clock_payload
         hhmm = now_dt.strftime("%H:%M")
         date_str = now_dt.strftime("%a, %b %d")
@@ -868,6 +884,8 @@ def main() -> int:
         else:
             temp_str = ""
         usage_pct = _pct(cached_five) if cached_five else None
+        if usage_pct is not None and _window_has_reset(_resets_at(cached_five)):
+            usage_pct = None
         if usage_pct is not None:
             countdown = _format_hm_countdown(_resets_at(cached_five))
             usage_str = f"{usage_pct}% resets in {countdown}"[:20]
