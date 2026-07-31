@@ -870,6 +870,7 @@ def main() -> int:
     cached_seven: "dict" = {}
     last_quota_line_tick = 0.0
     last_quota_line = ""          # last Q: string sent — skip write if unchanged
+    last_weekly_tick = 0.0
     last_weekly_line = ""         # last Y: string sent — skip write if unchanged
     limit_active = False          # showing the S_LIMIT display right now
     last_limit_tick = 0.0
@@ -1150,13 +1151,6 @@ def main() -> int:
                 five = (usage_data.get("five_hour") or {})
                 cached_five = five
                 cached_seven = (usage_data.get("seven_day") or {})
-                # 7-day line — cached on the device (Y:) for the button's
-                # long-press peek. Sent in all states, same as the gauge,
-                # so it's fresh whenever the button actually gets pressed.
-                weekly_line = format_weekly_line(cached_seven)
-                if weekly_line and weekly_line != last_weekly_line:
-                    if ser_write(f"Y:{weekly_line}\n".encode("ascii", "ignore")):
-                        last_weekly_line = weekly_line
                 pct = _pct(five)
                 if pct is not None and pct != last_gauge_pct:
                     # Only latch pct as "sent" if the write actually went out.
@@ -1184,6 +1178,23 @@ def main() -> int:
                     if ser_write((f"Q:{line}\n").encode("ascii", "ignore")):
                         last_quota_line = line
                         log(f"quota: {line}")
+
+            # Y: 7-day line refresh — independent tick using whatever's in
+            # cached_seven, same shape as the Q: refresh above, and NOT
+            # gated on state/screensaver (the peek has to work from any
+            # screen). This is what repopulates weeklyLineBuf on the Arduino
+            # after a reboot (daemon restart, replug, reflash all reset the
+            # Arduino's RAM via DTR, but cached_seven survives in the
+            # long-lived daemon process) -- without it, Y: would only go out
+            # again once a brand-new usage fetch happens to succeed, which
+            # can be minutes away under sustained 429 rate-limiting.
+            if cached_seven and now - last_weekly_tick > QUOTA_REFRESH_SECONDS:
+                last_weekly_tick = now
+                weekly_line = format_weekly_line(cached_seven)
+                if weekly_line and weekly_line != last_weekly_line:
+                    if ser_write(f"Y:{weekly_line}\n".encode("ascii", "ignore")):
+                        last_weekly_line = weekly_line
+                        log(f"weekly: {weekly_line}")
 
             # E: limit-reached display — takes over the screen for as long as
             # either usage window is fully spent, with a live countdown to
@@ -1258,6 +1269,14 @@ def main() -> int:
                         # only appeared once the first WORKING hook fired.
                         last_quota_kick = now
                         usage_kick()
+                        # Force the next Y: tick to resend regardless of
+                        # whether the computed line matches what was sent
+                        # before this reboot -- the Arduino's weeklyLineBuf
+                        # was just wiped by the reset, but cached_seven (and
+                        # thus the string dedup check) lives in this daemon
+                        # process and doesn't know that happened.
+                        last_weekly_tick = 0.0
+                        last_weekly_line = ""
                         # Always push a fresh K: so the device leaves the
                         # boot-only header and lands in S_CLOCK with date /
                         # time / weather right away — even if no hook has
