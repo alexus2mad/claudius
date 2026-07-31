@@ -83,7 +83,10 @@ SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 POLL_SECONDS = 0.1
 RECONNECT_SECONDS = 2.0                # device-scan cadence while disconnected
 IDLE_EXIT_SECONDS = 60 * 60 * 6        # 6 hours of inactivity → exit
-QUOTA_REFRESH_SECONDS = 10             # quota poll cadence in all states
+QUOTA_REFRESH_SECONDS = 10             # local redraw tick for Q:/Y:/E: (from cached data, no network)
+USAGE_POLL_SECONDS = 30                # actual /api/oauth/usage fetch cadence -- this endpoint
+                                        # rate-limits hard; polling every 10s (the old shared
+                                        # cadence) meant near-constant 429s in practice
 ONLINE_CHECK_SECONDS = 5               # scan sessions dir at this cadence
 SCREENSAVER_AFTER_SECONDS = 5 * 60     # IDLE this long → switch LCD to clock
 VERB_ROTATE_SECONDS = 20               # rotate working verb this often
@@ -1107,10 +1110,10 @@ def main() -> int:
                 last_weather_kick = now
                 weather_kick()
 
-            # 3b. Plan-usage refresh — uniform 10 s in all states so threshold
+            # 3b. Plan-usage refresh — uniform cadence in all states so threshold
             # crossings and the progress bar stay current regardless of whether
             # Claude is actively working or idle.
-            if now - last_quota_kick > QUOTA_REFRESH_SECONDS:
+            if now - last_quota_kick > USAGE_POLL_SECONDS:
                 last_quota_kick = now
                 usage_kick()
                 # Pay-as-you-go / API-key accounts have no OAuth session, so
