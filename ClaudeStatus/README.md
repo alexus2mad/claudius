@@ -50,7 +50,7 @@ needs its driver fixed — everything else goes under the user profile.
 - Windows 10 / 11
 - `winget` (default on Windows 10 ≥ 2004 / 11)
 - Arduino Uno or Nano (ATmega328P) with these connections to a 20×4 I²C LCD
-  (HW-061 backpack, address 0x27 or 0x3F):
+  (HW-61 backpack, address 0x27 or 0x3F):
   - LCD GND → Arduino GND
   - LCD VCC → Arduino 5V
   - LCD SDA → Arduino A4
