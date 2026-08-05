@@ -512,6 +512,10 @@ input[type=range]::-moz-range-thumb{width:19px;height:19px;background:var(--acce
     <div class="done-card" id="done-card"></div>
     <p class="done-hint">Close this window and open a terminal. Run <code>claude</code> — the LCD will update on the first response.</p>
     <p class="done-hint" style="margin-top:10px">Adjust brightness later: <code>python bl.py</code> in the app folder (arrow keys or pass a value 0–100).</p>
+    <p class="done-hint" style="margin-top:14px">
+      <a href="https://github.com/alexus2mad/claudius" target="_blank" rel="noopener"
+         style="color:var(--accent-hover)">github.com/alexus2mad/claudius</a>
+    </p>
   </div>
 
 </div>
